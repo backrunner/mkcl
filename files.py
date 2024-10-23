@@ -1,93 +1,89 @@
-from aix import genid
+from aix import generate_id
 
-class DogFiles(object):
+class FileManager:
     """
-    文件相关类
+    文件相关操作类
     """
 
-    def __init__(self, dogdbc):
+    def __init__(self, db_connection):
         """
-        数据库游标卡尺初始化
+        初始化数据库游标
         """
-        self.dogdb = dogdbc.cursor()
+        self.db_cursor = db_connection.cursor()
 
-    def get_dogfiles_n(self, dogid):
+    def get_file_references(self, file_id):
         """
-        媒体文件引用数量
+        获取媒体文件引用数量
         """
-        self.dogdb.execute("""select id from note where  %s = any("fileIds");""", [dogid])
-        dogres = self.dogdb.fetchall()
-        return len(dogres)
+        self.db_cursor.execute("""SELECT id FROM note WHERE %s = ANY("fileIds");""", [file_id])
+        results = self.db_cursor.fetchall()
+        return len(results)
 
-    def is_dogfile_local(self, dogid):
+    def is_file_local(self, file_id):
         """
         判断是否为本地存储文件
         """
-        self.dogdb.execute("""select "isLink" from drive_file where  id = %s ;""", [dogid])
-        dogres = self.dogdb.fetchall()
-        return dogres[0][0]
+        self.db_cursor.execute("""SELECT "isLink" FROM drive_file WHERE id = %s;""", [file_id])
+        result = self.db_cursor.fetchone()
+        return result[0]
 
-    def get_sigle_files(self,startdog, enddog):
+    def get_single_files(self, start_date, end_date):
         """
-        获取在一段时间内所有的帖子id列表
+        获取在一段时间内所有的单独文件id列表
         """
-        stid = genid(int(startdog.timestamp()*1000))
-        edid = genid(int(enddog.timestamp()*1000)) #enddog.
-        print("{}-{}".format(stid, edid))
-        self.dogdb.execute(
-            '''select drive_file."id" from drive_file 
-LEFT join note 
-on drive_file.id = any(note."fileIds")
-LEFT join public.user 
-on drive_file.id = public.user."avatarId" or drive_file.id = public.user."bannerId"
-where drive_file."id" < %s and drive_file."id" > %s and drive_file."isLink" is true and drive_file."userHost" is not null and note."id" is null and public.user."id" is null''', [edid, stid])
-        dogres = self.dogdb.fetchall()
-        pdogres = list(map(lambda x: x[0], dogres))
-        return pdogres
+        start_id = generate_id(int(start_date.timestamp() * 1000))
+        end_id = generate_id(int(end_date.timestamp() * 1000))
+        print(f"{start_id}-{end_id}")
+        self.db_cursor.execute(
+            '''SELECT drive_file."id" FROM drive_file 
+            LEFT JOIN note ON drive_file.id = ANY(note."fileIds")
+            LEFT JOIN public.user ON drive_file.id = public.user."avatarId" OR drive_file.id = public.user."bannerId"
+            WHERE drive_file."id" < %s AND drive_file."id" > %s AND drive_file."isLink" IS TRUE 
+            AND drive_file."userHost" IS NOT NULL AND note."id" IS NULL AND public.user."id" IS NULL''', 
+            [end_id, start_id]
+        )
+        results = self.db_cursor.fetchall()
+        return [result[0] for result in results]
 
-    def get_sigle_files_new(self,startdog, enddog,r):
+    def get_single_files_new(self, start_date, end_date, redis_conn):
         """
-        获取在一段时间内所有的帖子id列表
+        获取在一段时间内所有的单独文件id列表（新方法）
         """
-        Num=0
-        stid = genid(int(startdog.timestamp()*1000))
-        edid = genid(int(enddog.timestamp()*1000))
-        print("{}-{}".format(stid, edid))
-        # reslist=[]
+        page = 0
+        start_id = generate_id(int(start_date.timestamp() * 1000))
+        end_id = generate_id(int(end_date.timestamp() * 1000))
+        print(f"{start_id}-{end_id}")
+
         while True:
-            c=0
-            self.dogdb.execute('''select drive_file."id" from drive_file 
-             where drive_file."id" between %s and %s and drive_file."isLink" is true and drive_file."userHost" is not null limit 100 offset %s''', [stid, edid,Num*100])
-            dogres = self.dogdb.fetchall()
-            if len(dogres) == 0:
+            count = 0
+            self.db_cursor.execute(
+                '''SELECT drive_file."id" FROM drive_file 
+                WHERE drive_file."id" BETWEEN %s AND %s AND drive_file."isLink" IS TRUE 
+                AND drive_file."userHost" IS NOT NULL LIMIT 100 OFFSET %s''', 
+                [start_id, end_id, page * 100]
+            )
+            results = self.db_cursor.fetchall()
+            if not results:
                 break
-            pdogres = list(map(lambda x: x[0], dogres))
-            for i in pdogres:
-                if r.sismember('dogfile2',i):
+            file_ids = [result[0] for result in results]
+            for file_id in file_ids:
+                if redis_conn.sismember('file_cache', file_id):
                     continue
-                if self.check_file_sigle(i):
-                    r.sadd('dogfile',i)
-                    # reslist.append(i)
-                    c+=1
-                    #print(i)
-            Num+=1
-            print("第{}页-{}".format(Num,c))
-        # return reslist
+                if self.check_file_single(file_id):
+                    redis_conn.sadd('files_to_delete', file_id)
+                    count += 1
+            page += 1
+            print(f"第{page}页-{count}")
 
-    def check_file_sigle(self, dogid):
+    def check_file_single(self, file_id):
         """
         判断是否为单独文件
         """
-        r=self.get_dogfiles_n(dogid)
-        if r > 0:
+        if self.get_file_references(file_id) > 0:
             return False
-        self.dogdb.execute("""select "id" from public.user where  public.user."avatarId" = %s or public.user."bannerId" = %s limit 1 ;""", [dogid,dogid])
-        dogres = self.dogdb.fetchall()
-        if len(dogres) == 0:
-            return True
-        else:
-            return False
-
-
-
-
+        self.db_cursor.execute(
+            """SELECT "id" FROM public.user WHERE public.user."avatarId" = %s OR public.user."bannerId" = %s LIMIT 1;""", 
+            [file_id, file_id]
+        )
+        results = self.db_cursor.fetchall()
+        return len(results) == 0

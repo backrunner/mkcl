@@ -2,85 +2,67 @@ import yaml
 import argparse
 import time
 import datetime
-from core import dogclean, dog_post
-from chart import cleanchart
+from core import clean_data
+from chart import clean_chart
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-c', '--config', metavar='PATH', help='Path to misskey configuration file', action='store', default='.config/default.yml')
-parser.add_argument('-d', '--day', metavar='DAY', help='The days between now and the date when clear script stop cleaning', action='store', default=28, type=int)
-parser.add_argument('-s', '--start', metavar='DATE', help='The days between now and the date when clear script stop cleaning', action='store', default='2021-01-01')
-parser.add_argument('-w', '--week', metavar='WEEK', help='Week Mode', action='store', type=int)
-parser.add_argument('-m', '--month', metavar='MONTH', help='30 days Mode', action='store', type=int)
-parser.add_argument('-n', '--nopost', help='No Post Mode', action='store_true')
-parser.add_argument('-chart','--chart',metavar='DAY', help='Clean Chart days', action='store', type=int)
-parser.add_argument('-chart_only','--chart_only',metavar='DAY', help='Clean Chart days', action='store', type=int)
-parser.add_argument('-sfile','--sfile', help='Clean Single File Only', action='store_true')
+parser.add_argument('-d', '--days', metavar='DAYS', help='The days between now and the date when clear script stop cleaning', action='store', default=28, type=int)
+parser.add_argument('-s', '--start_date', metavar='DATE', help='The start date for cleaning', action='store', default='2021-01-01')
+parser.add_argument('-w', '--weeks', metavar='WEEKS', help='Week Mode', action='store', type=int)
+parser.add_argument('-m', '--months', metavar='MONTHS', help='30 days Mode', action='store', type=int)
+parser.add_argument('-n', '--no_post', help='No Post Mode', action='store_true')
+parser.add_argument('-chart','--chart',metavar='DAYS', help='Clean Chart days', action='store', type=int)
+parser.add_argument('-chart_only','--chart_only',metavar='DAYS', help='Clean Chart days only', action='store', type=int)
+parser.add_argument('-sfile','--single_file', help='Clean Single File Only', action='store_true')
 
-dogc = parser.parse_args()
+args = parser.parse_args()
 
-
-
-
-if dogc.week is not None:
-    dogday = time.localtime(time.time()-60*60*24*7*dogc.week)
-    erydog = str(time.strftime('%Y-%m-%d', dogday))
-    startdog = time.localtime(time.time()-60*60*24*7*(dogc.week+1))
-    sdog = str(time.strftime('%Y-%m-%d', startdog))
-elif dogc.month is not None:
-    dogday = time.localtime(time.time()-60*60*24*30*dogc.month)
-    erydog = str(time.strftime('%Y-%m-%d', dogday))
-    startdog = time.localtime(time.time()-60*60*24*30*(dogc.month+1))
-    sdog = str(time.strftime('%Y-%m-%d', startdog))
+if args.weeks is not None:
+    end_date = time.localtime(time.time() - 60*60*24*7*args.weeks)
+    end_date_str = str(time.strftime('%Y-%m-%d', end_date))
+    start_date = time.localtime(time.time() - 60*60*24*7*(args.weeks+1))
+    start_date_str = str(time.strftime('%Y-%m-%d', start_date))
+elif args.months is not None:
+    end_date = time.localtime(time.time() - 60*60*24*30*args.months)
+    end_date_str = str(time.strftime('%Y-%m-%d', end_date))
+    start_date = time.localtime(time.time() - 60*60*24*30*(args.months+1))
+    start_date_str = str(time.strftime('%Y-%m-%d', start_date))
 else:
-    dogday = time.localtime(time.time()-60*60*24*dogc.day)
-    erydog = str(time.strftime('%Y-%m-%d', dogday))
-    sdog = dogc.start
-dogfile = open(dogc.config)
-dogy = yaml.load(dogfile, Loader=yaml.FullLoader)
-dogfile.close()
+    end_date = time.localtime(time.time() - 60*60*24*args.days)
+    end_date_str = str(time.strftime('%Y-%m-%d', end_date))
+    start_date_str = args.start_date
 
-idtype = dogy["id"]
+with open(args.config) as config_file:
+    config = yaml.load(config_file, Loader=yaml.FullLoader)
 
-if idtype != "aid" and idtype != "aidx":
-    print("不支持的id类型,另请高明吧。")
+id_type = config["id"]
+
+if id_type not in ["aid", "aidx"]:
+    print("不支持的id类型")
     exit()
 
-dog_db_host = dogy['db']['host']
-dog_db_port = dogy['db']['port']
-dog_db_db = dogy['db']['db']
-dog_db_user = dogy['db']['user']
-dog_db_pass = dogy['db']['pass']
+db_config = config['db']
+redis_config = config['redis']
+url = config['url']
 
-dog_redis_host = dogy['redis']['host']
-dog_redis_port = dogy['redis']['port']
-dog_redis_pass = dogy['redis']['pass'] if ('pass' in dogy['redis']) else None
-dog_redis_db = dogy['redis']['db'] if ('db' in dogy['redis']) else None
-
-dog_url = dogy['url']
-
-if dogc.chart_only is not None:
-    cleanchart([dog_db_host, dog_db_port, dog_db_db, dog_db_user, dog_db_pass],dogc.chart_only)
-    strdogg = '\n清理部分图表数据成功'
-    if dogc.nopost is False:
-        dog_post([dog_db_host, dog_db_port, dog_db_db,
-              dog_db_user, dog_db_pass], dog_url, strdogg)
+if args.chart_only is not None:
+    clean_chart([db_config['host'], db_config['port'], db_config['db'], db_config['user'], db_config['pass']], args.chart_only)
+    result_message = '\n清理部分图表数据成功'
+    print(result_message)
     exit(0)
 
+start_time = datetime.datetime.now()
+cleaning_result = clean_data([db_config['host'], db_config['port'], db_config['db'], db_config['user'], db_config['pass']], 
+                             [redis_config['host'], redis_config['port'], redis_config.get('pass'), redis_config.get('db')], 
+                             start_date_str, end_date_str)
+end_time = datetime.datetime.now()
+duration = end_time - start_time
+result_message = '成功执行数据库清理\n清理范围:{}至{}\n{}\n用时{}s'.format(
+    start_date_str, end_date_str, cleaning_result, duration.seconds)
 
-a = datetime.datetime.now()
-resdoggg = dogclean([dog_db_host, dog_db_port, dog_db_db, dog_db_user, dog_db_pass], [
-                    dog_redis_host, dog_redis_port, dog_redis_pass, dog_redis_db], sdog, erydog)
-b = datetime.datetime.now()
-d = b-a
-strdogg = '成功执行[冗余信息退出机制](https://github.com/ybw2016v/mkcl)\n清理范围:{}至{}\n{}\n用时{}s'.format(
-    sdog, erydog, resdoggg, d.seconds)
+if args.chart is not None:
+    clean_chart([db_config['host'], db_config['port'], db_config['db'], db_config['user'], db_config['pass']], args.chart)
+    result_message += '\n清理部分图表数据成功'
 
-if dogc.chart is not None:
-    cleanchart([dog_db_host, dog_db_port, dog_db_db, dog_db_user, dog_db_pass],dogc.chart)
-    strdogg = strdogg + '\n清理部分图表数据成功'
-
-if dogc.nopost is False:
-    dog_post([dog_db_host, dog_db_port, dog_db_db,
-              dog_db_user, dog_db_pass], dog_url, strdogg)
-else:
-    print(strdogg)
+print(result_message)

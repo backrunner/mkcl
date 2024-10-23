@@ -1,167 +1,138 @@
-from aix import genid
-import time
+from aix import generate_id
 
-class DogNotes(object):
+class NoteManager:
     """
-    类与对象
+    笔记管理类
     """
 
-    def __init__(self, dogdbc):
+    def __init__(self, db_connection):
         """
-        数据库游标卡尺初始化
+        初始化数据库游标
         """
-        self.dogdb = dogdbc.cursor()
+        self.db_cursor = db_connection.cursor()
 
-    def get_dognotes_list(self, startdog, enddog):
+    def get_notes_list(self, start_date, end_date):
         """
-        获取在一段时间内所有的帖子id列表
+        获取在一段时间内所有的笔记id列表
         """
-        stid = genid(int(startdog.timestamp()*1000))
-        edid = genid(int(enddog.timestamp()*1000)) #enddog.
-        self.dogdb.execute(
-            """select id from note where "id" < %s and "id" > %s;""", [edid, stid])
-        dogres = self.dogdb.fetchall()
-        pdogres = list(map(lambda x: x[0], dogres))
-        return pdogres
+        start_id = generate_id(int(start_date.timestamp() * 1000))
+        end_id = generate_id(int(end_date.timestamp() * 1000))
+        self.db_cursor.execute(
+            """SELECT id FROM note WHERE "id" < %s AND "id" > %s;""", [end_id, start_id])
+        results = self.db_cursor.fetchall()
+        return [result[0] for result in results]
 
-    def get_dognote_info(self, dogid):
+    def get_note_info(self, note_id):
         """
-        获取单个帖子的相关信息
+        获取单个笔记的相关信息
         """
-        dogfleg=False
-        self.dogdb.execute("""select "userId","userHost",mentions,"renoteId","replyId","fileIds","hasPoll" from note where "id" = %s""", [dogid])
-        ooui=self.dogdb.fetchall()
-        if len(ooui)==0:
+        self.db_cursor.execute("""SELECT "userId", "userHost", mentions, "renoteId", "replyId", "fileIds", "hasPoll" FROM note WHERE "id" = %s""", [note_id])
+        result = self.db_cursor.fetchone()
+        if result is None:
             return 'error'
-        else:
-            dogres = {"id":dogid,"userId":ooui[0][0],"host":ooui[0][1],"mentions":ooui[0][2],"renoteId":ooui[0][3],"replyId":ooui[0][4],"fileIds":ooui[0][5],"hasPoll":ooui[0][6]}
 
-            self.dogdb.execute(
-                """select id from note_reaction where "noteId" = %s""", [dogid])
-            dogres2a = self.dogdb.fetchall()
-            if len(dogres2a)!=0:
-                dogfleg=True
-            self.dogdb.execute(
-                """select id from note_favorite where "noteId" = %s""", [dogid])
-            dogres2a = self.dogdb.fetchall()
-            if len(dogres2a)!=0:
-                dogfleg=True
-            self.dogdb.execute(
-                """select id from clip_note where "noteId" = %s""", [dogid])
-            dogres2a = self.dogdb.fetchall()
-            if len(dogres2a)!=0:
-                dogfleg=True
-            
-            self.dogdb.execute(
-                """select id from note_unread where "noteId" = %s""", [dogid])
-            dogres2a = self.dogdb.fetchall()
-            if len(dogres2a)!=0:
-                dogfleg=True
-            self.dogdb.execute(
-                """select id from note_watching where "noteId" = %s""", [dogid])
-            dogres2a = self.dogdb.fetchall()
-            if len(dogres2a)!=0:
-                dogfleg=True
-            self.dogdb.execute(
-                """select id from note_reaction where "noteId" = %s""", [dogid])
-            dogres2a = self.dogdb.fetchall()
-            if len(dogres2a)!=0:
-                dogfleg=True
-            dogres["dogfleg"]=dogfleg
-            return dogres
+        note_info = {
+            "id": note_id,
+            "userId": result[0],
+            "host": result[1],
+            "mentions": result[2],
+            "renoteId": result[3],
+            "replyId": result[4],
+            "fileIds": result[5],
+            "hasPoll": result[6],
+            "isFlagged": False
+        }
 
-    def get_dognote_beinfo(self, dogid):
-        """
-        获得被引用的列表
-        """
-        self.dogdb.execute(
-            """select id from note where "renoteId" = %s or "replyId" = %s """, [dogid, dogid])
-        dogres = self.dogdb.fetchall()
-        sdog = map(lambda x: x[0], dogres)
-        return list(sdog)
+        tables_to_check = [
+            "note_reaction", "note_favorite", "clip_note",
+            "note_unread", "note_watching"
+        ]
 
-    def is_dognote_pin(self, dogid):
-        """
-        查询帖子是否被置顶
-        """
-        self.dogdb.execute(
-            """select id from user_note_pining where "noteId" = %s """, [dogid])
-        dogres = self.dogdb.fetchall()
-        if len(dogres) == 0:
-            return False
-        else:
-            return True
+        for table in tables_to_check:
+            self.db_cursor.execute(f"""SELECT id FROM {table} WHERE "noteId" = %s LIMIT 1""", [note_id])
+            if self.db_cursor.fetchone():
+                note_info["isFlagged"] = True
+                break
 
-    def get_alldog_notes(self, idlist, hudog=[], ndog=0):
+        return note_info
+
+    def get_note_references(self, note_id):
         """
-        一个递归函数
+        获得引用和回复该笔记的id列表
         """
-        skidog = {}
-        # sxhdog = []
-        zhidog = []
-        for did in idlist:
-            # if did in hudog:
-                # print('error {}重复'.format(did))
-            # else:
-            lindog = self.get_dognote_info(did)
-            if lindog=='error':
-                print('出现错误 id {}'.format(did))
-            else:
-                skidog[did] = lindog
-                if lindog["renoteId"] is not None:
-                    zhidog.append(lindog["renoteId"])
-                if lindog["replyId"] is not None:
-                    zhidog.append(lindog["replyId"])
-            beidog = self.get_dognote_beinfo(did)
-            zhidog = zhidog+beidog
-        # print('循环完成')
-        zhidog = list(set(zhidog))
-        # print('zhidog:{}'.format(zhidog))
-        # print(hudog)
-        zhidog2=[]
-        for idog in zhidog:
-            if idog not in hudog:
-                # print('重复 {}'.format(idog))
-                zhidog2.append(idog)
-        # print(idlist)
-        ppodog = hudog+idlist
-        ppodog = list(set(ppodog))
-        # print(ppodog)
-        # print('zhidog:{}'.format(zhidog))
-        # print('***********')
-        # dfg=input()
-        if zhidog2 == []:
-            skiidog = {}
-        else:
-            skiidog = self.get_alldog_notes(zhidog2, ppodog, ndog)
-        resdog = dict(skidog, **skiidog)
-        return resdog
-    pass
+        self.db_cursor.execute(
+            """SELECT id FROM note WHERE "renoteId" = %s OR "replyId" = %s""", [note_id, note_id])
+        results = self.db_cursor.fetchall()
+        return [result[0] for result in results]
+
+    def is_note_pinned(self, note_id):
+        """
+        查询笔记是否被置顶
+        """
+        self.db_cursor.execute(
+            """SELECT id FROM user_note_pining WHERE "noteId" = %s LIMIT 1""", [note_id])
+        return self.db_cursor.fetchone() is not None
+
+    def get_all_related_notes(self, note_ids, processed_ids=None, depth=0):
+        """
+        递归获取所有相关笔记信息
+        """
+        if processed_ids is None:
+            processed_ids = set()
+
+        all_notes = {}
+        new_ids_to_process = []
+
+        for note_id in note_ids:
+            if note_id in processed_ids:
+                continue
+            processed_ids.add(note_id)
+
+            note_info = self.get_note_info(note_id)
+            if note_info == 'error':
+                print(f'出现错误 id {note_id}')
+                continue
+
+            all_notes[note_id] = note_info
+
+            if note_info["renoteId"] and note_info["renoteId"] not in processed_ids:
+                new_ids_to_process.append(note_info["renoteId"])
+            if note_info["replyId"] and note_info["replyId"] not in processed_ids:
+                new_ids_to_process.append(note_info["replyId"])
+
+            referenced_notes = self.get_note_references(note_id)
+            new_ids_to_process.extend([id for id in referenced_notes if id not in processed_ids])
+
+        if new_ids_to_process:
+            related_notes = self.get_all_related_notes(new_ids_to_process, processed_ids, depth + 1)
+            all_notes.update(related_notes)
+
+        return all_notes
 
 
-class DelDog(object):
+class NoteDeleter:
     """
-    删除类
+    笔记删除类
     """
-    def __init__(self,dogdb):
+    def __init__(self, db_connection):
         """
         初始化
         """
-        self.dogdb=dogdb
-        self.dogcr=dogdb.cursor()
+        self.db_connection = db_connection
+        self.db_cursor = db_connection.cursor()
 
-    def del_dog_note(self,dogid):
+    def delete_note(self, note_id):
         """
-        进行删除操作
+        删除笔记
         """
-        self.dogcr.execute(
-            """DELETE  from note where  "id" = %s """, [dogid])
-        self.dogdb.commit()
-    def del_dog_file(self,dogid):
+        self.db_cursor.execute(
+            """DELETE FROM note WHERE "id" = %s""", [note_id])
+        self.db_connection.commit()
+
+    def delete_file(self, file_id):
         """
-        进行删除操作
+        删除文件
         """
-        self.dogcr.execute(
-            """DELETE  from drive_file where  "id" = %s """, [dogid])
-        self.dogdb.commit()
-    pass
+        self.db_cursor.execute(
+            """DELETE FROM drive_file WHERE "id" = %s""", [file_id])
+        self.db_connection.commit()

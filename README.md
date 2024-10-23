@@ -46,7 +46,7 @@ python mkcl.py -d 50 -c config.yml -s 2020-12-01
 推荐使用`-w`周清模式，定时每周运行一次。
 
 ```bash
-python3 mkcl.py -w 8 -c config.yml # 清除8周前到9周前的帖子  
+python3 mkcl.py -w 8 -c config.yml # 清除8周前到9周前的帖子
 ```
 
 `-`
@@ -57,4 +57,3 @@ python3 mkcl.py -w 8 -c config.yml # 清除8周前到9周前的帖子
 ```
 pip install -r requirements.txt
 ```
-

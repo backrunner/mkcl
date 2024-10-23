@@ -26,5 +26,3 @@ def delchart(db,day):
     cur.execute("""DELETE  from __chart__instance where  "date" < %s """, [dtime])
     db.commit()
     pass
-
-# delchart('127.0.0.1',30)

@@ -59,7 +59,8 @@ def clean_data(db_info: List[str], redis_info: List[str], start_date: str, end_d
     redis_cache = RedisCache(db_conn, redis_conn)
 
     notes_to_process = note_manager.get_notes_list(start_datetime, end_datetime)
-    redis_conn.sadd('note_list', *[note_id for note_id in notes_to_process if not note_manager.is_note_pinned(note_id)])
+    if notes_to_process:
+        redis_conn.sadd('note_list', *[note_id for note_id in notes_to_process if not note_manager.is_note_pinned(note_id)])
 
     notes_to_delete: Set[str] = set()
     files_to_delete: Set[str] = set()

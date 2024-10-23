@@ -59,6 +59,7 @@ def clean_data(db_info: List[str], redis_info: List[str], start_date: str, end_d
     redis_cache = RedisCache(db_conn, redis_conn)
 
     notes_to_process = note_manager.get_notes_list(start_datetime, end_datetime)
+    print(f"找到 {len(notes_to_process)} 条需要处理的帖子")
     if notes_to_process:
         redis_conn.sadd('note_list', *[note_id for note_id in notes_to_process if not note_manager.is_note_pinned(note_id)])
 
@@ -66,12 +67,16 @@ def clean_data(db_info: List[str], redis_info: List[str], start_date: str, end_d
     files_to_delete: Set[str] = set()
     files_to_keep: Set[str] = set()
 
+    processed_notes_count = 0
     while True:
         note_batch = redis_conn.spop('note_list', 100)  # 批量处理提高效率
         if not note_batch:
             break
 
         notes_info = note_manager.get_all_related_notes(note_batch)
+        processed_notes_count += len(notes_info)
+        print(f"正在处理第 {processed_notes_count} 条帖子")
+
         for current_note_id, note_content in notes_info.items():
             should_keep = (
                 note_content['hasPoll'] or
@@ -93,6 +98,11 @@ def clean_data(db_info: List[str], redis_info: List[str], start_date: str, end_d
                     else:
                         files_to_delete.add(file_id)
 
+    print(f"处理完成，共处理 {processed_notes_count} 条帖子")
+    print(f"待删除帖子数: {len(notes_to_delete)}")
+    print(f"待删除文件数: {len(files_to_delete)}")
+    print(f"需要保留的文件数: {len(files_to_keep)}")
+
     # 批量添加到 Redis
     if notes_to_delete:
         redis_conn.sadd('notes_to_delete', *notes_to_delete)
@@ -106,24 +116,26 @@ def clean_data(db_info: List[str], redis_info: List[str], start_date: str, end_d
     deleted_files_count = delete_items(redis_conn, 'files_to_delete', note_deleter.delete_file, '文件')
 
     print("开始清理单独文件")
-    file_manager.get_single_files_new(start_datetime, end_datetime, redis_conn)
+    single_files_count = file_manager.get_single_files_new(start_datetime, end_datetime, redis_conn)
+    print(f"找到 {single_files_count} 个单独文件")
     deleted_files_count += delete_items(redis_conn, 'files_to_delete', note_deleter.delete_file, '文件')
 
     redis_conn.delete("files_to_keep")
     redis_cache.clear_cache()
 
-    result = f'共清退{deleted_notes_count}帖子 {deleted_files_count}文件'
+    result = f'共清退 {deleted_notes_count} 帖子 {deleted_files_count} 文件'
     print(result)
     return result
 
 def delete_items(redis_conn: redis.Redis, key: str, delete_func, item_name: str) -> int:
     count = 0
+    batch_size = 100
     while True:
-        items = redis_conn.spop(key, 100)  # 批量处理
+        items = redis_conn.spop(key, batch_size)
         if not items:
             break
         for item in items:
             delete_func(item)
             count += 1
-            print(f'已移除{item_name} {item}')
+        print(f'已移除 {count} 个{item_name}')
     return count

@@ -26,12 +26,32 @@ class NoteManager:
         """
         获取单个笔记的相关信息
         """
-        self.db_cursor.execute("""SELECT "userId", "userHost", mentions, "renoteId", "replyId", "fileIds", "hasPoll" FROM note WHERE "id" = %s""", [note_id])
+        self.db_cursor.execute("""
+            WITH flag_check AS (
+                SELECT TRUE AS is_flagged
+                FROM (
+                    SELECT 1 FROM note_reaction WHERE "noteId" = %(note_id)s
+                    UNION ALL
+                    SELECT 1 FROM note_favorite WHERE "noteId" = %(note_id)s
+                    UNION ALL
+                    SELECT 1 FROM clip_note WHERE "noteId" = %(note_id)s
+                    UNION ALL
+                    SELECT 1 FROM note_unread WHERE "noteId" = %(note_id)s
+                    UNION ALL
+                    SELECT 1 FROM note_watching WHERE "noteId" = %(note_id)s
+                    LIMIT 1
+                ) AS flag_subquery
+            )
+            SELECT n."userId", n."userHost", n.mentions, n."renoteId", n."replyId", n."fileIds", n."hasPoll",
+                   COALESCE((SELECT is_flagged FROM flag_check), FALSE) AS is_flagged
+            FROM note n
+            WHERE n."id" = %(note_id)s
+        """, {'note_id': note_id})
         result = self.db_cursor.fetchone()
         if result is None:
             return 'error'
 
-        note_info = {
+        return {
             "id": note_id,
             "userId": result[0],
             "host": result[1],
@@ -40,21 +60,8 @@ class NoteManager:
             "replyId": result[4],
             "fileIds": result[5],
             "hasPoll": result[6],
-            "isFlagged": False
+            "isFlagged": result[7]
         }
-
-        tables_to_check = [
-            "note_reaction", "note_favorite", "clip_note",
-            "note_unread", "note_watching"
-        ]
-
-        for table in tables_to_check:
-            self.db_cursor.execute(f"""SELECT id FROM {table} WHERE "noteId" = %s LIMIT 1""", [note_id])
-            if self.db_cursor.fetchone():
-                note_info["isFlagged"] = True
-                break
-
-        return note_info
 
     def get_note_references(self, note_id):
         """
@@ -81,27 +88,59 @@ class NoteManager:
             processed_ids = set()
 
         all_notes = {}
-        new_ids_to_process = []
+        new_ids_to_process = set()
 
-        for note_id in note_ids:
-            if note_id in processed_ids:
-                continue
+        # 批量获取笔记信息
+        self.db_cursor.execute("""
+            WITH flag_check AS (
+                SELECT "noteId", TRUE AS is_flagged
+                FROM (
+                    SELECT "noteId" FROM note_reaction
+                    UNION ALL
+                    SELECT "noteId" FROM note_favorite
+                    UNION ALL
+                    SELECT "noteId" FROM clip_note
+                    UNION ALL
+                    SELECT "noteId" FROM note_unread
+                    UNION ALL
+                    SELECT "noteId" FROM note_watching
+                ) AS flag_subquery
+                WHERE "noteId" = ANY(%(note_ids)s)
+                GROUP BY "noteId"
+            )
+            SELECT n.id, n."userId", n."userHost", n.mentions, n."renoteId", n."replyId", n."fileIds", n."hasPoll",
+                   COALESCE(f.is_flagged, FALSE) AS is_flagged
+            FROM note n
+            LEFT JOIN flag_check f ON n.id = f."noteId"
+            WHERE n.id = ANY(%(note_ids)s)
+        """, {'note_ids': list(set(note_ids) - processed_ids)})
+
+        for result in self.db_cursor.fetchall():
+            note_id = result[0]
             processed_ids.add(note_id)
+            all_notes[note_id] = {
+                "id": note_id,
+                "userId": result[1],
+                "host": result[2],
+                "mentions": result[3],
+                "renoteId": result[4],
+                "replyId": result[5],
+                "fileIds": result[6],
+                "hasPoll": result[7],
+                "isFlagged": result[8]
+            }
 
-            note_info = self.get_note_info(note_id)
-            if note_info == 'error':
-                print(f'出现错误 id {note_id}')
-                continue
+            if all_notes[note_id]["renoteId"] and all_notes[note_id]["renoteId"] not in processed_ids:
+                new_ids_to_process.add(all_notes[note_id]["renoteId"])
+            if all_notes[note_id]["replyId"] and all_notes[note_id]["replyId"] not in processed_ids:
+                new_ids_to_process.add(all_notes[note_id]["replyId"])
 
-            all_notes[note_id] = note_info
-
-            if note_info["renoteId"] and note_info["renoteId"] not in processed_ids:
-                new_ids_to_process.append(note_info["renoteId"])
-            if note_info["replyId"] and note_info["replyId"] not in processed_ids:
-                new_ids_to_process.append(note_info["replyId"])
-
-            referenced_notes = self.get_note_references(note_id)
-            new_ids_to_process.extend([id for id in referenced_notes if id not in processed_ids])
+        # 批量获取引用和回复
+        if note_ids:
+            self.db_cursor.execute("""
+                SELECT id FROM note WHERE "renoteId" = ANY(%(note_ids)s) OR "replyId" = ANY(%(note_ids)s)
+            """, {'note_ids': list(note_ids)})
+            new_ids_to_process.update(id[0] for id in self.db_cursor.fetchall() if id[0] not in processed_ids)
 
         if new_ids_to_process:
             related_notes = self.get_all_related_notes(new_ids_to_process, processed_ids, depth + 1)

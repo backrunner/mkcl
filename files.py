@@ -15,9 +15,13 @@ class FileManager:
         """
         获取媒体文件引用数量
         """
-        self.db_cursor.execute("""SELECT id FROM note WHERE %s = ANY("fileIds");""", [file_id])
-        results = self.db_cursor.fetchall()
-        return len(results)
+        self.db_cursor.execute("""
+            SELECT COUNT(*)
+            FROM note
+            WHERE %s = ANY("fileIds");
+        """, [file_id])
+        result = self.db_cursor.fetchone()
+        return result[0]
 
     def is_file_local(self, file_id):
         """
@@ -35,12 +39,19 @@ class FileManager:
         end_id = generate_id(int(end_date.timestamp() * 1000))
         print(f"{start_id}-{end_id}")
         self.db_cursor.execute(
-            '''SELECT drive_file."id" FROM drive_file 
-            LEFT JOIN note ON drive_file.id = ANY(note."fileIds")
-            LEFT JOIN public.user ON drive_file.id = public.user."avatarId" OR drive_file.id = public.user."bannerId"
-            WHERE drive_file."id" < %s AND drive_file."id" > %s AND drive_file."isLink" IS TRUE 
-            AND drive_file."userHost" IS NOT NULL AND note."id" IS NULL AND public.user."id" IS NULL''', 
-            [end_id, start_id]
+            '''SELECT df."id"
+            FROM drive_file df
+            WHERE df."id" BETWEEN %s AND %s
+              AND df."isLink" IS TRUE
+              AND df."userHost" IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM note n WHERE df.id = ANY(n."fileIds")
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM public.user u WHERE df.id IN (u."avatarId", u."bannerId")
+              )
+              ''',
+            [start_id, end_id]
         )
         results = self.db_cursor.fetchall()
         return [result[0] for result in results]
@@ -55,21 +66,28 @@ class FileManager:
         print(f"{start_id}-{end_id}")
 
         while True:
-            count = 0
             self.db_cursor.execute(
-                '''SELECT drive_file."id" FROM drive_file 
-                WHERE drive_file."id" BETWEEN %s AND %s AND drive_file."isLink" IS TRUE 
-                AND drive_file."userHost" IS NOT NULL LIMIT 100 OFFSET %s''', 
+                '''SELECT df."id"
+                FROM drive_file df
+                WHERE df."id" BETWEEN %s AND %s
+                  AND df."isLink" IS TRUE
+                  AND df."userHost" IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM note n WHERE df.id = ANY(n."fileIds")
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM public.user u WHERE df.id IN (u."avatarId", u."bannerId")
+                  )
+                LIMIT 100 OFFSET %s''',
                 [start_id, end_id, page * 100]
             )
             results = self.db_cursor.fetchall()
             if not results:
                 break
             file_ids = [result[0] for result in results]
+            count = 0
             for file_id in file_ids:
-                if redis_conn.sismember('file_cache', file_id):
-                    continue
-                if self.check_file_single(file_id):
+                if not redis_conn.sismember('file_cache', file_id):
                     redis_conn.sadd('files_to_delete', file_id)
                     count += 1
             page += 1
@@ -79,11 +97,16 @@ class FileManager:
         """
         判断是否为单独文件
         """
-        if self.get_file_references(file_id) > 0:
-            return False
         self.db_cursor.execute(
-            """SELECT "id" FROM public.user WHERE public.user."avatarId" = %s OR public.user."bannerId" = %s LIMIT 1;""", 
-            [file_id, file_id]
+            """
+            SELECT
+                CASE
+                    WHEN EXISTS (SELECT 1 FROM note WHERE %s = ANY("fileIds")) THEN FALSE
+                    WHEN EXISTS (SELECT 1 FROM public.user WHERE "avatarId" = %s OR "bannerId" = %s) THEN FALSE
+                    ELSE TRUE
+                END AS is_single
+            """,
+            [file_id, file_id, file_id]
         )
-        results = self.db_cursor.fetchall()
-        return len(results) == 0
+        result = self.db_cursor.fetchone()
+        return result[0]

@@ -1,8 +1,8 @@
 import psycopg
 import redis
-
 import datetime
 import pytz
+from typing import List, Dict, Set
 from notes import NoteManager, NoteDeleter
 from users import User
 from files import FileManager
@@ -19,124 +19,110 @@ class RedisCache:
         """
         self.db_connection = db_connection
         self.redis = redis_connection
+        self.user_cache: Dict[str, bool] = {}
 
-    def get_user_info(self, user_id):
+    def get_user_info(self, user_id: str) -> bool:
         """
         获取用户信息
         """
+        if user_id in self.user_cache:
+            return self.user_cache[user_id]
+
         user_info = self.redis.hget('users', user_id)
         if user_info is not None:
-            return user_info == 'True'
+            result = user_info == 'True'
         else:
             user = User(self.db_connection, user_id)
-            if user.is_local or user.is_vip:
-                self.redis.hset('users', user_id, 'True')
-                return True
-            else:
-                self.redis.hset('users', user_id, 'False')
-                return False
+            result = user.is_local or user.is_vip
+            self.redis.hset('users', user_id, str(result))
+
+        self.user_cache[user_id] = result
+        return result
 
     def clear_cache(self):
         """
         清除缓存用户列表
         """
         self.redis.delete("users")
+        self.user_cache.clear()
 
-def clean_data(db_info, redis_info, start_date, end_date):
+def clean_data(db_info: List[str], redis_info: List[str], start_date: str, end_date: str) -> str:
     redis_conn = redis.Redis(host=redis_info[0], port=redis_info[1], db=redis_info[3], password=redis_info[2], decode_responses=True)
-    db_conn = psycopg.connect("dbname={} user={} password={} host={} port={}".format(db_info[2], db_info[3], db_info[4], db_info[0], db_info[1]))
+    db_conn = psycopg.connect(f"dbname={db_info[2]} user={db_info[3]} password={db_info[4]} host={db_info[0]} port={db_info[1]}")
 
-    start_datetime = datetime.datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=pytz.timezone('UTC'))
-    end_datetime = datetime.datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=pytz.timezone('UTC'))
+    start_datetime = datetime.datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=pytz.UTC)
+    end_datetime = datetime.datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=pytz.UTC)
     end_id = generate_id(int(end_datetime.timestamp() * 1000))
 
     note_manager = NoteManager(db_conn)
     file_manager = FileManager(db_conn)
-
-    notes_to_process = note_manager.get_notes_list(start_datetime, end_datetime)
-    for note_id in notes_to_process:
-        if not note_manager.is_note_pinned(note_id):
-            redis_conn.sadd('note_list', note_id)
-
-    note_to_delete = redis_conn.srandmember('note_list')
     redis_cache = RedisCache(db_conn, redis_conn)
 
-    while note_to_delete is not None:
-        current_note_id = str(note_to_delete)
-        notes_info = note_manager.get_all_related_notes([current_note_id])
-        should_keep = False
-        note_ids = []
-        file_ids = []
-        user_ids = []
+    notes_to_process = note_manager.get_notes_list(start_datetime, end_datetime)
+    redis_conn.sadd('note_list', *[note_id for note_id in notes_to_process if not note_manager.is_note_pinned(note_id)])
 
-        for note_id, note_content in notes_info.items():
-            note_ids.append(note_id)
-            user_ids.append(note_content['userId'])
-            file_ids.extend(note_content["fileIds"])
-            if note_content['hasPoll'] or note_content["isFlagged"]:
-                should_keep = True
-            if note_content["id"] > end_id:
-                should_keep = True
+    notes_to_delete: Set[str] = set()
+    files_to_delete: Set[str] = set()
+    files_to_keep: Set[str] = set()
 
-        for user_id in user_ids:
-            user_info = redis_cache.get_user_info(user_id)
-            should_keep = should_keep or user_info
+    while True:
+        note_batch = redis_conn.spop('note_list', 100)  # 批量处理提高效率
+        if not note_batch:
+            break
 
-        if not should_keep:
-            for note_id in note_ids:
-                redis_conn.sadd('notes_to_delete', note_id)
+        notes_info = note_manager.get_all_related_notes(note_batch)
+        for current_note_id, note_content in notes_info.items():
+            should_keep = (
+                note_content['hasPoll'] or
+                note_content["isFlagged"] or
+                note_content["id"] > end_id or
+                any(redis_cache.get_user_info(user_id) for user_id in note_content['userIds'])
+            )
 
-            for file_id in file_ids:
-                file_references = file_manager.get_file_references(file_id)
-                is_local_file = file_manager.is_file_local(file_id)
-                if file_references > 1 or not is_local_file:
-                    print(f"特殊情况：{file_id} 不予删除 {is_local_file}")
-                    redis_conn.sadd('files_to_keep', file_id)
-                else:
-                    redis_conn.sadd('files_to_delete', file_id)
-        else:
-            for file_id in file_ids:
-                redis_conn.sadd('files_to_keep', file_id)
+            if should_keep:
+                files_to_keep.update(note_content["fileIds"])
+            else:
+                notes_to_delete.add(current_note_id)
+                for file_id in note_content["fileIds"]:
+                    file_references = file_manager.get_file_references(file_id)
+                    is_local_file = file_manager.is_file_local(file_id)
+                    if file_references > 1 or not is_local_file:
+                        print(f"特殊情况：{file_id} 不予删除 {is_local_file}")
+                        files_to_keep.add(file_id)
+                    else:
+                        files_to_delete.add(file_id)
 
-        for note_id in note_ids:
-            redis_conn.srem('note_list', note_id)
-        if current_note_id not in note_ids:
-            redis_conn.srem('note_list', current_note_id)
-
-        note_to_delete = redis_conn.srandmember('note_list')
+    # 批量添加到 Redis
+    if notes_to_delete:
+        redis_conn.sadd('notes_to_delete', *notes_to_delete)
+    if files_to_delete:
+        redis_conn.sadd('files_to_delete', *files_to_delete)
+    if files_to_keep:
+        redis_conn.sadd('files_to_keep', *files_to_keep)
 
     note_deleter = NoteDeleter(db_conn)
-    note_to_delete = redis_conn.srandmember('notes_to_delete')
-    deleted_notes_count = 0
-    deleted_files_count = 0
-
-    while note_to_delete is not None:
-        deleted_notes_count += 1
-        note_deleter.delete_note(note_to_delete)
-        redis_conn.srem('notes_to_delete', note_to_delete)
-        print(f'已移除帖子 {note_to_delete}')
-        note_to_delete = redis_conn.srandmember('notes_to_delete')
-
-    file_to_delete = redis_conn.srandmember('files_to_delete')
-    while file_to_delete is not None:
-        deleted_files_count += 1
-        note_deleter.delete_file(file_to_delete)
-        redis_conn.srem('files_to_delete', file_to_delete)
-        print(f'已移除文件 {file_to_delete}')
-        file_to_delete = redis_conn.srandmember('files_to_delete')
+    deleted_notes_count = delete_items(redis_conn, 'notes_to_delete', note_deleter.delete_note, '帖子')
+    deleted_files_count = delete_items(redis_conn, 'files_to_delete', note_deleter.delete_file, '文件')
 
     print("开始清理单独文件")
     file_manager.get_single_files_new(start_datetime, end_datetime, redis_conn)
-
-    file_to_delete = redis_conn.srandmember('files_to_delete')
-    while file_to_delete is not None:
-        deleted_files_count += 1
-        note_deleter.delete_file(file_to_delete)
-        redis_conn.srem('files_to_delete', file_to_delete)
-        print(f'已移除文件 {file_to_delete}')
-        file_to_delete = redis_conn.srandmember('files_to_delete')
+    deleted_files_count += delete_items(redis_conn, 'files_to_delete', note_deleter.delete_file, '文件')
 
     redis_conn.delete("files_to_keep")
     redis_cache.clear_cache()
-    print(f'共移除{deleted_notes_count}帖子 {deleted_files_count}文件')
-    return f'共清退{deleted_notes_count}帖子 {deleted_files_count}文件'
+
+    result = f'共清退{deleted_notes_count}帖子 {deleted_files_count}文件'
+    print(result)
+    return result
+
+def delete_items(redis_conn: redis.Redis, key: str, delete_func, item_name: str) -> int:
+    count = 0
+    while True:
+        items = redis_conn.spop(key, 100)  # 批量处理
+        if not items:
+            break
+        for item in items:
+            delete_func(item)
+            count += 1
+            print(f'已移除{item_name} {item}')
+    return count

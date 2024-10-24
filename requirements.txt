@@ -1,5 +1,6 @@
 pytz
 psycopg
+psycopg_pool
 redis
 requests
 base36

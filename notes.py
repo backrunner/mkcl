@@ -111,6 +111,7 @@ class NoteManager:
                 INNER JOIN related_notes rn
                 ON n.id = rn."renoteId" OR n.id = rn."replyId" OR
                    n."renoteId" = rn.id OR n."replyId" = rn.id
+                WHERE rn.id IS NOT NULL
             ),
             flag_status AS (
                 SELECT DISTINCT "noteId", TRUE AS is_flagged
@@ -128,7 +129,7 @@ class NoteManager:
                 WHERE "noteId" IN (SELECT id FROM related_notes)
             )
             SELECT
-                rn.id, rn."userId", rn."userHost", rn.mentions, 
+                rn.id, rn."userId", rn."userHost", rn.mentions,
                 rn."renoteId", rn."replyId", rn."fileIds", rn."hasPoll",
                 COALESCE(fs.is_flagged, FALSE) AS is_flagged
             FROM related_notes rn

@@ -27,23 +27,22 @@ class NoteManager:
         获取单个笔记的相关信息
         """
         self.db_cursor.execute("""
-            WITH flag_check AS (
-                SELECT TRUE AS is_flagged
-                FROM (
-                    SELECT 1 FROM note_reaction WHERE "noteId" = %(note_id)s
-                    UNION ALL
-                    SELECT 1 FROM note_favorite WHERE "noteId" = %(note_id)s
-                    UNION ALL
-                    SELECT 1 FROM clip_note WHERE "noteId" = %(note_id)s
-                    UNION ALL
-                    SELECT 1 FROM note_unread WHERE "noteId" = %(note_id)s
-                    UNION ALL
-                    SELECT 1 FROM note_watching WHERE "noteId" = %(note_id)s
-                    LIMIT 1
-                ) AS flag_subquery
-            )
             SELECT n."userId", n."userHost", n.mentions, n."renoteId", n."replyId", n."fileIds", n."hasPoll",
-                   COALESCE((SELECT is_flagged FROM flag_check), FALSE) AS is_flagged
+                   EXISTS (
+                       SELECT 1
+                       FROM (
+                           SELECT "noteId" FROM note_reaction WHERE "noteId" = %(note_id)s
+                           UNION ALL
+                           SELECT "noteId" FROM note_favorite WHERE "noteId" = %(note_id)s
+                           UNION ALL
+                           SELECT "noteId" FROM clip_note WHERE "noteId" = %(note_id)s
+                           UNION ALL
+                           SELECT "noteId" FROM note_unread WHERE "noteId" = %(note_id)s
+                           UNION ALL
+                           SELECT "noteId" FROM note_watching WHERE "noteId" = %(note_id)s
+                           LIMIT 1
+                       ) AS flag_subquery
+                   ) AS is_flagged
             FROM note n
             WHERE n."id" = %(note_id)s
         """, {'note_id': note_id})
@@ -82,18 +81,39 @@ class NoteManager:
 
     def get_all_related_notes(self, note_ids, processed_ids=None, depth=0):
         """
-        递归获取所有相关笔记信息
+        递归获取所有相关笔记信息的优化版本
         """
         if processed_ids is None:
             processed_ids = set()
 
-        all_notes = {}
-        new_ids_to_process = set()
+        # 转换为list并去重，避免重复查询
+        note_ids_to_process = list(set(note_ids) - processed_ids)
+        if not note_ids_to_process:
+            return {}
 
-        # 批量获取笔记信息
+        all_notes = {}
+
+        # 使用WITH RECURSIVE优化递归查询
         self.db_cursor.execute("""
-            WITH flag_check AS (
-                SELECT "noteId", TRUE AS is_flagged
+            WITH RECURSIVE related_notes AS (
+                -- Base case: direct notes
+                SELECT n.id, n."userId", n."userHost", n.mentions, n."renoteId", n."replyId", 
+                       n."fileIds", n."hasPoll"
+                FROM note n
+                WHERE n.id = ANY(%(note_ids)s)
+
+                UNION
+
+                -- Recursive case: related notes (replies and renotes)
+                SELECT n.id, n."userId", n."userHost", n.mentions, n."renoteId", n."replyId",
+                       n."fileIds", n."hasPoll"
+                FROM note n
+                INNER JOIN related_notes rn
+                ON n.id = rn."renoteId" OR n.id = rn."replyId" OR
+                   n."renoteId" = rn.id OR n."replyId" = rn.id
+            ),
+            flag_status AS (
+                SELECT DISTINCT "noteId", TRUE AS is_flagged
                 FROM (
                     SELECT "noteId" FROM note_reaction
                     UNION ALL
@@ -104,16 +124,16 @@ class NoteManager:
                     SELECT "noteId" FROM note_unread
                     UNION ALL
                     SELECT "noteId" FROM note_watching
-                ) AS flag_subquery
-                WHERE "noteId" = ANY(%(note_ids)s)
-                GROUP BY "noteId"
+                ) AS flag_sources
+                WHERE "noteId" IN (SELECT id FROM related_notes)
             )
-            SELECT n.id, n."userId", n."userHost", n.mentions, n."renoteId", n."replyId", n."fileIds", n."hasPoll",
-                   COALESCE(f.is_flagged, FALSE) AS is_flagged
-            FROM note n
-            LEFT JOIN flag_check f ON n.id = f."noteId"
-            WHERE n.id = ANY(%(note_ids)s)
-        """, {'note_ids': list(set(note_ids) - processed_ids)})
+            SELECT
+                rn.id, rn."userId", rn."userHost", rn.mentions, 
+                rn."renoteId", rn."replyId", rn."fileIds", rn."hasPoll",
+                COALESCE(fs.is_flagged, FALSE) AS is_flagged
+            FROM related_notes rn
+            LEFT JOIN flag_status fs ON rn.id = fs."noteId"
+        """, {'note_ids': note_ids_to_process})
 
         for result in self.db_cursor.fetchall():
             note_id = result[0]
@@ -130,25 +150,7 @@ class NoteManager:
                 "isFlagged": result[8]
             }
 
-            if all_notes[note_id]["renoteId"] and all_notes[note_id]["renoteId"] not in processed_ids:
-                new_ids_to_process.add(all_notes[note_id]["renoteId"])
-            if all_notes[note_id]["replyId"] and all_notes[note_id]["replyId"] not in processed_ids:
-                new_ids_to_process.add(all_notes[note_id]["replyId"])
-
-        # 批量获取引用和回复
-        if note_ids:
-            self.db_cursor.execute("""
-                SELECT id FROM note WHERE "renoteId" = ANY(%(note_ids)s) OR "replyId" = ANY(%(note_ids)s)
-            """, {'note_ids': list(note_ids)})
-            new_ids_to_process.update(id[0] for id in self.db_cursor.fetchall() if id[0] not in processed_ids)
-
-        if new_ids_to_process:
-            related_notes = self.get_all_related_notes(new_ids_to_process, processed_ids, depth + 1)
-            all_notes.update(related_notes)
-
         return all_notes
-
-
 class NoteDeleter:
     """
     笔记删除类

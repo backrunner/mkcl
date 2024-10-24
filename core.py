@@ -66,6 +66,7 @@ def clean_data(db_info: List[str], redis_info: List[str], start_date: str, end_d
     notes_to_delete: Set[str] = set()
     files_to_delete: Set[str] = set()
     files_to_keep: Set[str] = set()
+    all_file_ids: Set[str] = set()
 
     processed_notes_count = 0
     while True:
@@ -76,6 +77,13 @@ def clean_data(db_info: List[str], redis_info: List[str], start_date: str, end_d
         notes_info = note_manager.get_all_related_notes(note_batch)
         processed_notes_count += len(notes_info)
         print(f"正在处理第 {processed_notes_count} 条帖子")
+
+        # 收集所有文件ID
+        for note_content in notes_info.values():
+            all_file_ids.update(note_content["fileIds"])
+
+        # 预加载文件信息
+        file_manager.preload_file_info(all_file_ids)
 
         for current_note_id, note_content in notes_info.items():
             should_keep = (

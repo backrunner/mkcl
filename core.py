@@ -82,7 +82,7 @@ def clean_data(db_info: List[str], redis_info: List[str], start_date: str, end_d
                 note_content['hasPoll'] or
                 note_content["isFlagged"] or
                 note_content["id"] > end_id or
-                any(redis_cache.get_user_info(user_id) for user_id in note_content['userIds'])
+                redis_cache.get_user_info(note_content['userId'])
             )
 
             if should_keep:

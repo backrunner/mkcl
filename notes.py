@@ -65,14 +65,6 @@ class NoteManager:
         results = self.db_cursor.fetchall()
         return [result[0] for result in results]
 
-    def is_note_pinned(self, note_id):
-        """
-        查询笔记是否被置顶
-        """
-        self.db_cursor.execute(
-            """SELECT id FROM user_note_pining WHERE "noteId" = %s LIMIT 1""", [note_id])
-        return self.db_cursor.fetchone() is not None
-
     def get_all_related_notes(self, note_ids, processed_ids=None, depth=0):
         """
         递归获取所有相关笔记信息
@@ -108,6 +100,28 @@ class NoteManager:
             all_notes.update(related_notes)
 
         return all_notes
+
+    def get_pinned_notes(self, note_ids):
+        """
+        批量获取置顶帖子列表
+        Args:
+            note_ids (list): 帖子ID列表
+        Returns:
+            set: 置顶帖子ID集合
+        """
+        if not note_ids:
+            return set()
+
+        # 使用 IN 查询一次性获取所有置顶帖子
+        placeholders = ','.join(['%s'] * len(note_ids))
+        query = f"""
+            SELECT "noteId"
+            FROM user_note_pining
+            WHERE "noteId" IN ({placeholders})
+        """
+        self.db_cursor.execute(query, note_ids)
+        results = self.db_cursor.fetchall()
+        return {str(result[0]) for result in results}
 
 
 class NoteDeleter:

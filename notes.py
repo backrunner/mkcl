@@ -124,31 +124,62 @@ class NoteManager:
     def get_notes_batch(self, note_ids):
         """
         批量获取帖子信息
+        Args:
+            note_ids (list): 帖子ID列表
+        Returns:
+            dict: 帖子信息字典，key为帖子ID，value为帖子详细信息
         """
         if not note_ids:
             return {}
 
+        # 获取基本帖子信息
         self.db_cursor.execute(
             """
-            SELECT id, "userId", "fileIds", "hasPoll",
-                   "isFlagged", "renoteId", "replyId"
+            SELECT id, "userId", "userHost", mentions, "renoteId", "replyId",
+                "fileIds", "hasPoll"
             FROM note
             WHERE id = ANY(%s)
             """,
             [note_ids]
         )
-        return {
-            row[0]: {
+
+        notes_info = {}
+        for row in self.db_cursor.fetchall():
+            notes_info[row[0]] = {
                 "id": row[0],
                 "userId": row[1],
-                "fileIds": row[2] or [],
-                "hasPoll": row[3],
-                "isFlagged": row[4],
-                "renoteId": row[5],
-                "replyId": row[6]
+                "host": row[2],
+                "mentions": row[3],
+                "renoteId": row[4],
+                "replyId": row[5],
+                "fileIds": row[6] or [],
+                "hasPoll": row[7],
+                "isFlagged": False
             }
-            for row in self.db_cursor.fetchall()
-        }
+
+        # 批量检查标记状态
+        if notes_info:
+            tables_to_check = [
+                "note_reaction", "note_favorite", "clip_note",
+                "note_unread", "note_watching"
+            ]
+
+            for table in tables_to_check:
+                self.db_cursor.execute(
+                    f"""
+                    SELECT DISTINCT "noteId"
+                    FROM {table}
+                    WHERE "noteId" = ANY(%s)
+                    """,
+                    [list(notes_info.keys())]
+                )
+                flagged_notes = {row[0] for row in self.db_cursor.fetchall()}
+
+                for note_id in flagged_notes:
+                    if note_id in notes_info:
+                        notes_info[note_id]["isFlagged"] = True
+
+        return notes_info
 
     def analyze_notes_batch(self, note_ids, end_id, redis_conn, file_manager, batch_size=100):
         """

@@ -2,7 +2,7 @@ import psycopg
 import redis
 import datetime
 import pytz
-from notes import NoteManager, NoteDeleter
+from notes import NoteManager
 from users import User
 from files import FileManager
 from aix import generate_id

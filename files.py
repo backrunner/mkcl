@@ -10,6 +10,7 @@ class FileManager:
         初始化数据库游标
         """
         self.db_cursor = db_connection.cursor()
+        self.db_conn = db_connection
 
     def get_file_references(self, file_id):
         """
@@ -35,11 +36,11 @@ class FileManager:
         end_id = generate_id(int(end_date.timestamp() * 1000))
         print(f"{start_id}-{end_id}")
         self.db_cursor.execute(
-            '''SELECT drive_file."id" FROM drive_file 
+            '''SELECT drive_file."id" FROM drive_file
             LEFT JOIN note ON drive_file.id = ANY(note."fileIds")
             LEFT JOIN public.user ON drive_file.id = public.user."avatarId" OR drive_file.id = public.user."bannerId"
-            WHERE drive_file."id" < %s AND drive_file."id" > %s AND drive_file."isLink" IS TRUE 
-            AND drive_file."userHost" IS NOT NULL AND note."id" IS NULL AND public.user."id" IS NULL''', 
+            WHERE drive_file."id" < %s AND drive_file."id" > %s AND drive_file."isLink" IS TRUE
+            AND drive_file."userHost" IS NOT NULL AND note."id" IS NULL AND public.user."id" IS NULL''',
             [end_id, start_id]
         )
         results = self.db_cursor.fetchall()
@@ -57,9 +58,9 @@ class FileManager:
         while True:
             count = 0
             self.db_cursor.execute(
-                '''SELECT drive_file."id" FROM drive_file 
-                WHERE drive_file."id" BETWEEN %s AND %s AND drive_file."isLink" IS TRUE 
-                AND drive_file."userHost" IS NOT NULL LIMIT 100 OFFSET %s''', 
+                '''SELECT drive_file."id" FROM drive_file
+                WHERE drive_file."id" BETWEEN %s AND %s AND drive_file."isLink" IS TRUE
+                AND drive_file."userHost" IS NOT NULL LIMIT 100 OFFSET %s''',
                 [start_id, end_id, page * 100]
             )
             results = self.db_cursor.fetchall()
@@ -82,8 +83,68 @@ class FileManager:
         if self.get_file_references(file_id) > 0:
             return False
         self.db_cursor.execute(
-            """SELECT "id" FROM public.user WHERE public.user."avatarId" = %s OR public.user."bannerId" = %s LIMIT 1;""", 
+            """SELECT "id" FROM public.user WHERE public.user."avatarId" = %s OR public.user."bannerId" = %s LIMIT 1;""",
             [file_id, file_id]
         )
         results = self.db_cursor.fetchall()
         return len(results) == 0
+
+    def get_file_references_batch(self, file_ids):
+        """
+        批量获取文件引用数
+        """
+        if not file_ids:
+            return {}
+
+        self.db_cursor.execute(
+            """
+            SELECT f.id, COUNT(n.id)
+            FROM drive_file f
+            LEFT JOIN note n ON f.id = ANY(n."fileIds")
+            WHERE f.id = ANY(%s)
+            GROUP BY f.id
+            """,
+            [file_ids]
+        )
+        return dict(self.db_cursor.fetchall())
+
+    def get_files_info_batch(self, file_ids):
+        """
+        批量获取文件信息
+        """
+        if not file_ids:
+            return {}
+
+        self.db_cursor.execute(
+            """
+            SELECT id, "isLink", "userHost"
+            FROM drive_file
+            WHERE id = ANY(%s)
+            """,
+            [file_ids]
+        )
+        return {row[0]: {"isLink": row[1], "userHost": row[2]}
+                for row in self.db_cursor.fetchall()}
+
+    def check_user_avatar_banner_batch(self, file_ids):
+        """
+        批量检查文件是否被用作头像或横幅
+        """
+        if not file_ids:
+            return set()
+
+        self.db_cursor.execute(
+            """
+            SELECT DISTINCT "avatarId", "bannerId"
+            FROM public.user
+            WHERE "avatarId" = ANY(%s) OR "bannerId" = ANY(%s)
+            """,
+            [file_ids, file_ids]
+        )
+        used_files = set()
+        for avatar_id, banner_id in self.db_cursor.fetchall():
+            if avatar_id:
+                used_files.add(avatar_id)
+            if banner_id:
+                used_files.add(banner_id)
+        return used_files

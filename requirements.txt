@@ -4,3 +4,4 @@ redis
 requests
 base36
 pyyaml
+tqdm

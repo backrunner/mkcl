@@ -112,14 +112,14 @@ class NoteManager:
         if not note_ids:
             return set()
 
-        # 使用 IN 查询一次性获取所有置顶帖子
-        placeholders = ','.join(['%s'] * len(note_ids))
-        query = f"""
+        # PostgreSQL中使用 = ANY 语法替代 IN，这样可以正确处理参数化查询
+        query = """
             SELECT "noteId"
             FROM user_note_pining
-            WHERE "noteId" IN ({placeholders})
+            WHERE "noteId" = ANY(%s)
         """
-        self.db_cursor.execute(query, note_ids)
+        # 将note_ids列表作为一个数组参数传递
+        self.db_cursor.execute(query, (note_ids,))
         results = self.db_cursor.fetchall()
         return {str(result[0]) for result in results}
 

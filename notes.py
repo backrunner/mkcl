@@ -124,23 +124,42 @@ class NoteManager:
     def get_notes_batch(self, note_ids):
         """
         批量获取帖子信息
-        Args:
-            note_ids (list): 帖子ID列表
-        Returns:
-            dict: 帖子信息字典，key为帖子ID，value为帖子详细信息
         """
         if not note_ids:
             return {}
 
-        # 获取基本帖子信息
+        # 使用CTE优化查询
         self.db_cursor.execute(
             """
-            SELECT id, "userId", "userHost", mentions, "renoteId", "replyId",
-                "fileIds", "hasPoll"
-            FROM note
-            WHERE id = ANY(%s)
+            WITH flagged_notes AS (
+                SELECT DISTINCT "noteId"
+                FROM (
+                    SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s)
+                    UNION ALL
+                    SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s)
+                    UNION ALL
+                    SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s)
+                    UNION ALL
+                    SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s)
+                    UNION ALL
+                    SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s)
+                ) combined_flags
+            )
+            SELECT
+                n.id,
+                n."userId",
+                n."userHost",
+                n.mentions,
+                n."renoteId",
+                n."replyId",
+                n."fileIds",
+                n."hasPoll",
+                CASE WHEN fn."noteId" IS NOT NULL THEN TRUE ELSE FALSE END as "isFlagged"
+            FROM note n
+            LEFT JOIN flagged_notes fn ON n.id = fn."noteId"
+            WHERE n.id = ANY(%s)
             """,
-            [note_ids]
+            [note_ids, note_ids, note_ids, note_ids, note_ids, note_ids]
         )
 
         notes_info = {}
@@ -154,30 +173,8 @@ class NoteManager:
                 "replyId": row[5],
                 "fileIds": row[6] or [],
                 "hasPoll": row[7],
-                "isFlagged": False
+                "isFlagged": row[8]
             }
-
-        # 批量检查标记状态
-        if notes_info:
-            tables_to_check = [
-                "note_reaction", "note_favorite", "clip_note",
-                "note_unread", "note_watching"
-            ]
-
-            for table in tables_to_check:
-                self.db_cursor.execute(
-                    f"""
-                    SELECT DISTINCT "noteId"
-                    FROM {table}
-                    WHERE "noteId" = ANY(%s)
-                    """,
-                    [list(notes_info.keys())]
-                )
-                flagged_notes = {row[0] for row in self.db_cursor.fetchall()}
-
-                for note_id in flagged_notes:
-                    if note_id in notes_info:
-                        notes_info[note_id]["isFlagged"] = True
 
         return notes_info
 

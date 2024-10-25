@@ -98,13 +98,17 @@ class FileManager:
 
         self.db_cursor.execute(
             """
-            SELECT f.id, COUNT(n.id)
-            FROM drive_file f
-            LEFT JOIN note n ON f.id = ANY(n."fileIds")
-            WHERE f.id = ANY(%s)
-            GROUP BY f.id
+            WITH file_refs AS (
+                SELECT unnest(n."fileIds") as file_id, count(*) as ref_count
+                FROM note n
+                WHERE n."fileIds" && %s
+                GROUP BY unnest(n."fileIds")
+            )
+            SELECT f.id, COALESCE(fr.ref_count, 0) as ref_count
+            FROM unnest(%s::text[]) as f(id)
+            LEFT JOIN file_refs fr ON fr.file_id = f.id
             """,
-            [file_ids]
+            [file_ids, file_ids]
         )
         return dict(self.db_cursor.fetchall())
 

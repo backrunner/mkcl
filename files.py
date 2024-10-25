@@ -152,3 +152,19 @@ class FileManager:
             if banner_id:
                 used_files.add(banner_id)
         return used_files
+
+    def delete_files_batch(self, file_ids: list[str]) -> None:
+        """
+        批量删除文件
+        """
+        if not file_ids:
+            return
+
+        self.db_cursor.execute(
+            """
+            DELETE FROM drive_file
+            WHERE id = ANY(%s)
+            """,
+            [file_ids]
+        )
+        self.db_conn.commit()

@@ -57,3 +57,26 @@ python3 mkcl.py -w 8 -c config.yml # 清除8周前到9周前的帖子
 ```
 pip install -r requirements.txt
 ```
+
+为了你的数据库跑得快一点，请使用下面的索引：
+
+```sql
+-- 基本索引
+CREATE INDEX IF NOT EXISTS "idx_note_id_composite" ON note (id, "userId", "userHost", "renoteId", "replyId");
+CREATE INDEX IF NOT EXISTS "idx_note_renote_reply" ON note ("renoteId", "replyId");
+CREATE INDEX IF NOT EXISTS "idx_note_fileids" ON note USING gin ("fileIds");
+
+-- 相关表的索引
+CREATE INDEX IF NOT EXISTS "idx_note_reaction_noteid" ON note_reaction ("noteId");
+CREATE INDEX IF NOT EXISTS "idx_note_favorite_noteid" ON note_favorite ("noteId");
+CREATE INDEX IF NOT EXISTS "idx_clip_note_noteid" ON clip_note ("noteId");
+CREATE INDEX IF NOT EXISTS "idx_note_unread_noteid" ON note_unread ("noteId");
+CREATE INDEX IF NOT EXISTS "idx_note_watching_noteid" ON note_watching ("noteId");
+
+-- user表索引
+CREATE INDEX IF NOT EXISTS "idx_user_avatar_banner" ON public.user ("avatarId", "bannerId");
+CREATE INDEX IF NOT EXISTS "idx_user_host_composite" ON public.user (host, "followersCount", "followingCount");
+
+-- drive_file表索引
+CREATE INDEX IF NOT EXISTS "idx_drive_file_composite" ON drive_file (id, "isLink", "userHost");
+```

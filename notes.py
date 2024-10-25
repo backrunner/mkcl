@@ -281,6 +281,22 @@ class NoteManager:
 
         return len(notes_to_delete)
 
+    def delete_notes_batch(self, note_ids: list[str]) -> None:
+        """
+        批量删除帖子
+        """
+        if not note_ids:
+            return
+
+        self.db_cursor.execute(
+            """
+            DELETE FROM note
+            WHERE id = ANY(%s)
+            """,
+            [note_ids]
+        )
+        self.db_conn.commit()
+
 
 class NoteDeleter:
     """

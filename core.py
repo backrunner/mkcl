@@ -1,6 +1,5 @@
 import psycopg
 import redis
-
 import datetime
 import pytz
 from notes import NoteManager, NoteDeleter

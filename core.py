@@ -40,6 +40,12 @@ class RedisConnection:
             self._client = Redis(connection_pool=self.pool)
         return self._client
 
+    def pipeline(self):
+        """
+        获取 Redis pipeline
+        """
+        return self.client.pipeline()
+
     @backoff.on_exception(
         backoff.expo,
         (ConnectionError, TimeoutError),
@@ -131,7 +137,7 @@ class DatabaseConnection:
 
 def clean_data(db_info, redis_info, start_date, end_date):
     print("开始数据清理流程...")
-    
+
     # 使用新的 Redis 连接管理器
     redis_conn = RedisConnection(redis_info)
     db = DatabaseConnection(db_info)

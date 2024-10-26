@@ -1,5 +1,8 @@
 from aix import generate_id
 
+if TYPE_CHECKING:
+    from core import RedisConnection
+
 class NoteManager:
     """
     笔记管理类
@@ -99,7 +102,7 @@ class NoteManager:
 
         return notes_info
 
-    def analyze_notes_batch(self, note_ids, end_id, redis_conn, file_manager, batch_size=100):
+    def analyze_notes_batch(self, note_ids, end_id, redis_conn: RedisConnection, file_manager, batch_size=100):
         """
         批量分析帖子
         """
@@ -146,7 +149,19 @@ class NoteManager:
         pipeline = redis_conn.pipeline()
         for user_id in all_user_ids:
             pipeline.hget('user_cache', user_id)
-        user_results = dict(zip(all_user_ids, pipeline.execute()))
+
+        try:
+            user_results = dict(zip(all_user_ids, redis_conn.execute(
+                lambda: pipeline.execute()
+            )))
+        except (ConnectionError, TimeoutError):
+            # 如果执行失败，重试整个批处理
+            pipeline = redis_conn.pipeline()
+            for user_id in all_user_ids:
+                pipeline.hget('user_cache', user_id)
+            user_results = dict(zip(all_user_ids, redis_conn.execute(
+                lambda: pipeline.execute()
+            )))
 
         # 处理未缓存的用户
         uncached_users = {
@@ -192,13 +207,15 @@ class NoteManager:
                 else:
                     pipeline.sadd('files_to_delete', file_id)
 
+            redis_conn.execute(lambda: pipeline.execute())
+
         # 更新Redis
         pipeline = redis_conn.pipeline()
         for note_id in notes_to_delete:
             pipeline.sadd('notes_to_delete', note_id)
         for note_id in note_ids:
             pipeline.srem('note_list', note_id)
-        pipeline.execute()
+        redis_conn.execute(lambda: pipeline.execute())
 
         return len(notes_to_delete)
 

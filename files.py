@@ -1,5 +1,8 @@
 from aix import generate_id
 
+if TYPE_CHECKING:
+    from core import RedisConnection
+
 class FileManager:
     """
     文件相关操作类
@@ -46,7 +49,7 @@ class FileManager:
         results = self.db_cursor.fetchall()
         return [result[0] for result in results]
 
-    def get_single_files_new(self, start_date, end_date, redis_conn):
+    def get_single_files_new(self, start_date, end_date, redis_conn: RedisConnection):
         """
         获取在一段时间内所有的单独文件id列表（新方法）
         """
@@ -66,12 +69,16 @@ class FileManager:
             results = self.db_cursor.fetchall()
             if not results:
                 break
+
             file_ids = [result[0] for result in results]
             for file_id in file_ids:
-                if redis_conn.sismember('file_cache', file_id):
+                # 使用 execute 方法包装 Redis 操作
+                if redis_conn.execute(lambda: redis_conn.client.sismember('file_cache', file_id)):
                     continue
                 if self.check_file_single(file_id):
-                    redis_conn.sadd('files_to_delete', file_id)
+                    redis_conn.execute(
+                        lambda: redis_conn.client.sadd('files_to_delete', file_id)
+                    )
                     count += 1
             page += 1
             print(f"第{page}页-{count}")

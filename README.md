@@ -1,8 +1,8 @@
 # mkcl
 
-~~一键删库脚本~~ misskey 冗余数据退出机制
+基于原版 MKCL 的改进版本，支持进度展示 / 连接池。
 
-一个类似于 mastodon `tootctl statuses remove` 的自动化删库脚本，用于删除数据库内符合特定条件的帖子与媒体文件记录。
+## 概念
 
 名词定义：帖子链
 
@@ -29,32 +29,9 @@
 
 ## 使用方法
 
-**注意**：该操作为不可逆操作，操作不当可能会使数据丢失，请慎重。
-
-``` bash
-python3 mkcl.py [-h] [-c PATH] [-d DAY] [-s DATE]
-```
-
-`-c` 为misskey配置文件路径，默认`.config/default.yml` `-d` 为清理结束距今天数，默认为28 `-s`为清理开始日期默认为2021-01-01
-
-例子:
-
-``` bash
-python mkcl.py -d 50 -c config.yml -s 2020-12-01
-```
-
-推荐使用`-w`周清模式，定时每周运行一次。
+### 前置准备
 
 ```bash
-python3 mkcl.py -w 8 -c config.yml # 清除8周前到9周前的帖子
-```
-
-`-`
-## 注意
-
-`2023.10.0`版本后misskey数据库有变动，需下载最新版本mkcl并安装依赖。
-
-```
 pip install -r requirements.txt
 ```
 
@@ -79,4 +56,28 @@ CREATE INDEX IF NOT EXISTS "idx_user_host_composite" ON public.user (host, "foll
 
 -- drive_file表索引
 CREATE INDEX IF NOT EXISTS "idx_drive_file_composite" ON drive_file (id, "isLink", "userHost");
+```
+
+### 可用参数
+
+**注意**：该操作为不可逆操作，操作不当可能会使数据丢失，请慎重。
+
+强烈推荐使用 `gobackup` 等工具进行数据库备份。
+
+``` bash
+python3 mkcl.py [-h] [-c PATH] [-d DAY] [-s DATE]
+```
+
+`-c` 为misskey配置文件路径，默认`.config/default.yml` `-d` 为清理结束距今天数，默认为28 `-s`为清理开始日期默认为2021-01-01
+
+例子:
+
+``` bash
+python mkcl.py -d 50 -c config.yml -s 2020-12-01
+```
+
+`-w` 周清模式，只会清理指定某一周的帖子数据，适合用于定时任务。
+
+```bash
+python3 mkcl.py -w 8 -c config.yml # 清除8周前到9周前的帖子
 ```

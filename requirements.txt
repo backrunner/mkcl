@@ -1,7 +1,8 @@
 pytz
-psycopg
+psycopg_pool
 redis
 requests
 base36
 pyyaml
 tqdm
+backoff

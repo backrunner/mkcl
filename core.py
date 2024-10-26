@@ -43,7 +43,7 @@ def clean_data(db_info, redis_info, start_date, end_date):
                 current_batch = notes_to_process[:batch_size]
                 notes_to_process = notes_to_process[batch_size:]
 
-                batch_deleted = note_manager.analyze_notes_batch(
+                batch_deleted = note_manager.analyze_notes_batch_parallel(
                     current_batch,
                     end_id,
                     redis_conn,

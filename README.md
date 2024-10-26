@@ -50,15 +50,23 @@ CREATE INDEX IF NOT EXISTS "idx_clip_note_noteid" ON clip_note ("noteId");
 CREATE INDEX IF NOT EXISTS "idx_note_unread_noteid" ON note_unread ("noteId");
 CREATE INDEX IF NOT EXISTS "idx_note_watching_noteid" ON note_watching ("noteId");
 
+-- 时间范围查询优化
+CREATE INDEX IF NOT EXISTS "idx_note_id_range" ON note (id DESC);
+CREATE INDEX IF NOT EXISTS "idx_drive_file_id_range" ON drive_file (id DESC);
+
 -- user表索引
 CREATE INDEX IF NOT EXISTS "idx_user_avatar_banner" ON public.user ("avatarId", "bannerId");
 CREATE INDEX IF NOT EXISTS "idx_user_host_composite" ON public.user (host, "followersCount", "followingCount");
+CREATE INDEX IF NOT EXISTS "idx_user_id_host_counts" ON public.user (id, host, "followersCount", "followingCount");
 
 -- drive_file表索引
 CREATE INDEX IF NOT EXISTS "idx_drive_file_composite" ON drive_file (id, "isLink", "userHost");
-```
 
-### 可用参数
+-- 帖子分析优化索引
+CREATE INDEX IF NOT EXISTS "idx_note_userid_composite" ON note ("userId", "userHost", "hasPoll") 
+WHERE "hasPoll" = true OR "userHost" IS NULL;
+
+-- 可用参数
 
 **注意**：该操作为不可逆操作，操作不当可能会使数据丢失，请慎重。
 

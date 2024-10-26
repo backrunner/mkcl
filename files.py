@@ -1,9 +1,5 @@
 from aix import generate_id
-from typing import TYPE_CHECKING
-
-
-if TYPE_CHECKING:
-    from core import RedisConnection
+from connection import RedisConnection
 
 class FileManager:
     """

@@ -1,5 +1,6 @@
 from aix import generate_id
 from connection import RedisConnection
+from tqdm import tqdm
 
 class FileManager:
     """
@@ -29,57 +30,61 @@ class FileManager:
         result = self.db_cursor.fetchone()
         return result[0]
 
-    def get_single_files(self, start_date, end_date):
+    def get_single_files(self, start_date, end_date, redis_conn: RedisConnection):
         """
         获取在一段时间内所有的单独文件id列表
         """
         start_id = generate_id(int(start_date.timestamp() * 1000))
         end_id = generate_id(int(end_date.timestamp() * 1000))
-        print(f"{start_id}-{end_id}")
+        print(f"扫描文件范围: {start_id}-{end_id}")
+
+        # 首先获取总数
         self.db_cursor.execute(
-            '''SELECT drive_file."id" FROM drive_file
-            LEFT JOIN note ON drive_file.id = ANY(note."fileIds")
-            LEFT JOIN public.user ON drive_file.id = public.user."avatarId" OR drive_file.id = public.user."bannerId"
-            WHERE drive_file."id" < %s AND drive_file."id" > %s AND drive_file."isLink" IS TRUE
-            AND drive_file."userHost" IS NOT NULL AND note."id" IS NULL AND public.user."id" IS NULL''',
-            [end_id, start_id]
+            '''SELECT COUNT(*) FROM drive_file
+            WHERE drive_file."id" BETWEEN %s AND %s AND drive_file."isLink" IS TRUE
+            AND drive_file."userHost" IS NOT NULL''',
+            [start_id, end_id]
         )
-        results = self.db_cursor.fetchall()
-        return [result[0] for result in results]
+        total_count = self.db_cursor.fetchone()[0]
 
-    def get_single_files_new(self, start_date, end_date, redis_conn: RedisConnection):
-        """
-        获取在一段时间内所有的单独文件id列表（新方法）
-        """
         page = 0
-        start_id = generate_id(int(start_date.timestamp() * 1000))
-        end_id = generate_id(int(end_date.timestamp() * 1000))
-        print(f"{start_id}-{end_id}")
+        processed = 0
+        deleted = 0
+        batch_size = 100
 
-        while True:
-            count = 0
-            self.db_cursor.execute(
-                '''SELECT drive_file."id" FROM drive_file
-                WHERE drive_file."id" BETWEEN %s AND %s AND drive_file."isLink" IS TRUE
-                AND drive_file."userHost" IS NOT NULL LIMIT 100 OFFSET %s''',
-                [start_id, end_id, page * 100]
-            )
-            results = self.db_cursor.fetchall()
-            if not results:
-                break
+        with tqdm(total=total_count, desc="扫描单独文件") as pbar:
+            while processed < total_count:
+                self.db_cursor.execute(
+                    '''SELECT drive_file."id" FROM drive_file
+                    WHERE drive_file."id" BETWEEN %s AND %s AND drive_file."isLink" IS TRUE
+                    AND drive_file."userHost" IS NOT NULL LIMIT %s OFFSET %s''',
+                    [start_id, end_id, batch_size, page * batch_size]
+                )
+                results = self.db_cursor.fetchall()
+                if not results:
+                    break
 
-            file_ids = [result[0] for result in results]
-            for file_id in file_ids:
-                # 使用 execute 方法包装 Redis 操作
-                if redis_conn.execute(lambda: redis_conn.client.sismember('file_cache', file_id)):
-                    continue
-                if self.check_file_single(file_id):
-                    redis_conn.execute(
-                        lambda: redis_conn.client.sadd('files_to_delete', file_id)
-                    )
-                    count += 1
-            page += 1
-            print(f"第{page}页-{count}")
+                file_ids = [result[0] for result in results]
+                for file_id in file_ids:
+                    if redis_conn.execute(lambda: redis_conn.client.sismember('file_cache', file_id)):
+                        continue
+                    if self.check_file_single(file_id):
+                        redis_conn.execute(
+                            lambda: redis_conn.client.sadd('files_to_delete', file_id)
+                        )
+                        deleted += 1
+
+                current_batch_size = len(file_ids)
+                processed += current_batch_size
+                page += 1
+
+                pbar.update(current_batch_size)
+                pbar.set_postfix({
+                    '已处理': processed,
+                    '待删除': deleted
+                })
+
+        print(f"\n找到 {deleted} 个单独文件需要删除")
 
     def check_file_single(self, file_id):
         """

@@ -53,6 +53,8 @@ CREATE INDEX IF NOT EXISTS "idx_note_watching_noteid" ON note_watching ("noteId"
 -- 时间范围查询优化
 CREATE INDEX IF NOT EXISTS "idx_note_id_range" ON note (id DESC);
 CREATE INDEX IF NOT EXISTS "idx_drive_file_id_range" ON drive_file (id DESC);
+CREATE INDEX IF NOT EXISTS "idx_drive_file_link_host_id" ON drive_file ("isLink", "userHost", id)
+WHERE "isLink" IS TRUE AND "userHost" IS NOT NULL;
 
 -- user表索引
 CREATE INDEX IF NOT EXISTS "idx_user_avatar_banner" ON public.user ("avatarId", "bannerId");
@@ -63,7 +65,7 @@ CREATE INDEX IF NOT EXISTS "idx_user_id_host_counts" ON public.user (id, host, "
 CREATE INDEX IF NOT EXISTS "idx_drive_file_composite" ON drive_file (id, "isLink", "userHost");
 
 -- 帖子分析优化索引
-CREATE INDEX IF NOT EXISTS "idx_note_userid_composite" ON note ("userId", "userHost", "hasPoll") 
+CREATE INDEX IF NOT EXISTS "idx_note_userid_composite" ON note ("userId", "userHost", "hasPoll")
 WHERE "hasPoll" = true OR "userHost" IS NULL;
 
 -- 可用参数

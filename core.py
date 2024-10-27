@@ -94,7 +94,7 @@ def clean_data(db_info, redis_info, start_date, end_date):
                 pbar.update(len(files_batch))
 
         print("\n步骤 5/5: 清理单独文件...")
-        file_manager.get_single_files_new(start_datetime, end_datetime, redis_conn)
+        file_manager.get_single_files(start_datetime, end_datetime, redis_conn)
 
         remaining_files = redis_conn.execute(
             lambda: redis_conn.client.smembers('files_to_delete')

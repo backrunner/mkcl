@@ -158,18 +158,27 @@ class FileManager:
                 used_files.add(banner_id)
         return used_files
 
-    def delete_files_batch(self, file_ids: list[str]) -> None:
+    def delete_files_batch(self, file_ids: list[str], batch_size: int = 1000) -> None:
         """
-        批量删除文件
+        批量删除文件，采用分批处理方式
+        Args:
+            file_ids: 要删除的文件ID列表
+            batch_size: 每批处理的数量，默认1000
         """
         if not file_ids:
             return
 
+        # 使用 WITH 和 JOIN 来优化删除操作
         self.db_cursor.execute(
             """
-            DELETE FROM drive_file
-            WHERE id = ANY(%s)
+            WITH batch_ids AS (
+                SELECT unnest(%s::text[]) AS id
+            )
+            DELETE FROM drive_file df
+            USING batch_ids b
+            WHERE df.id = b.id
             """,
             [file_ids]
         )
+
         self.db_conn.commit()

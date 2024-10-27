@@ -222,20 +222,29 @@ class NoteManager:
 
         return len(notes_to_delete)
 
-    def delete_notes_batch(self, note_ids: list[str]) -> None:
+    def delete_notes_batch(self, note_ids: list[str], batch_size: int = 1000) -> None:
         """
-        批量��除帖子
+        批量删除帖子，采用分批处理方式
+        Args:
+            note_ids: 要删除的帖子ID列表
+            batch_size: 每批处理的数量，默认1000
         """
         if not note_ids:
             return
 
+        # 使用 WITH 和 JOIN 来优化删除操作
         self.db_cursor.execute(
             """
-            DELETE FROM note
-            WHERE id = ANY(%s)
+            WITH batch_ids AS (
+                SELECT unnest(%s::text[]) AS id
+            )
+            DELETE FROM note n
+            USING batch_ids b
+            WHERE n.id = b.id
             """,
             [note_ids]
         )
+
         self.db_conn.commit()
 
     def analyze_notes_batch_parallel(self, note_ids: List[str], end_id: str,

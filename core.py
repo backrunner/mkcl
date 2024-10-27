@@ -13,6 +13,21 @@ def clean_data(db_info, redis_info, start_date, end_date):
     redis_conn = RedisConnection(redis_info)
     db = DatabaseConnection(db_info)
 
+    # 清理之前的缓存数据
+    print("清理历史缓存...")
+    cache_keys = [
+        'notes_to_delete',
+        'files_to_delete',
+        'files_to_keep',
+        'file_cache',
+        'user_cache',
+        'users',
+        'note_list'
+    ]
+
+    for key in cache_keys:
+        redis_conn.execute(lambda: redis_conn.client.delete(key))
+
     with db.get_connection() as db_conn:
         start_datetime = datetime.datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=pytz.timezone('UTC'))
         end_datetime = datetime.datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=pytz.timezone('UTC'))

@@ -163,7 +163,6 @@ class FileManager:
         批量删除文件，采用分批处理方式
         Args:
             file_ids: 要删除的文件ID列表
-            batch_size: 每批处理的数量，默认1000
         """
         if not file_ids:
             return

@@ -227,7 +227,6 @@ class NoteManager:
         批量删除帖子，采用分批处理方式
         Args:
             note_ids: 要删除的帖子ID列表
-            batch_size: 每批处理的数量，默认1000
         """
         if not note_ids:
             return

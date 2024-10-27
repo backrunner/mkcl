@@ -49,7 +49,7 @@ def clean_data(db_info, redis_info, start_date, end_date):
         notes_to_process = list(set(notes_to_process) - pinned_notes)
 
         print("\n步骤 2/5: 分析帖子关联...")
-        batch_size = 100
+        batch_size = 200
         processed_count = 0
         deleted_notes = 0
 

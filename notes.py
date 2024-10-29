@@ -51,104 +51,82 @@ class NoteManager:
     def get_notes_batch(self, note_ids):
         """
         批量获取帖子信息
+        Args:
+            note_ids: 帖子ID列表
+        Returns:
+            dict: 帖子信息字典，如果查询失败则返回空字典
         """
         if not note_ids:
             return {}
 
-        max_retries = 3
-        retry_count = 0
-
-        while retry_count < max_retries:
-            try:
-                # 检查连接状态
-                if self.db_cursor.closed:
-                    self.db_cursor = self.db_conn.cursor()
-                
-                # 确保 note_ids 是列表类型
-                note_ids = list(note_ids)
-                
-                # 使用CTE优化查询
-                self.db_cursor.execute(
-                    """
-                    WITH flag_status AS (
-                        SELECT "noteId", TRUE as is_flagged
-                        FROM (
-                            SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s)
-                            UNION
-                            SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s)
-                            UNION
-                            SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s)
-                            UNION
-                            SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s)
-                            UNION
-                            SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s)
-                        ) combined_flags
-                    )
-                    SELECT
-                        n.id,
-                        n."userId",
-                        n."userHost",
-                        n."mentions",
-                        n."renoteId",
-                        n."replyId",
-                        n."fileIds",
-                        n."hasPoll",
-                        COALESCE(f.is_flagged, FALSE) as "isFlagged"
-                    FROM note n
-                    LEFT JOIN flag_status f ON n.id = f."noteId"
-                    WHERE n.id = ANY(%s)
-                    """,
-                    [note_ids, note_ids, note_ids, note_ids, note_ids, note_ids]
+        try:
+            # 检查连接状态
+            if self.db_cursor.closed:
+                self.db_cursor = self.db_conn.cursor()
+            
+            # 确保 note_ids 是列表类型
+            note_ids = list(note_ids)
+            
+            # 使用CTE优化查询
+            self.db_cursor.execute(
+                """
+                WITH flag_status AS (
+                    SELECT "noteId", TRUE as is_flagged
+                    FROM (
+                        SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s)
+                        UNION
+                        SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s)
+                        UNION
+                        SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s)
+                        UNION
+                        SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s)
+                        UNION
+                        SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s)
+                    ) combined_flags
                 )
+                SELECT
+                    n.id,
+                    n."userId",
+                    n."userHost",
+                    n.mentions,
+                    n."renoteId",
+                    n."replyId",
+                    n."fileIds",
+                    n."hasPoll",
+                    COALESCE(f.is_flagged, FALSE) as "isFlagged"
+                FROM note n
+                LEFT JOIN flag_status f ON n.id = f."noteId"
+                WHERE n.id = ANY(%s)
+                """,
+                [note_ids, note_ids, note_ids, note_ids, note_ids, note_ids]
+            )
 
-                # 检查查询是否成功执行
-                if self.db_cursor.description is None:
-                    return {}
+            # 检查查询是否成功执行
+            if self.db_cursor.description is None:
+                return {}
 
-                results = self.db_cursor.fetchall()
-                # 如果是空结果集，直接返回空字典，不需要重试
-                if not results:
-                    return {}
+            results = self.db_cursor.fetchall()
+            if not results:
+                return {}
 
-                notes_info = {}
-                for row in results:
-                    notes_info[row[0]] = {
-                        "id": row[0],
-                        "userId": row[1],
-                        "host": row[2],
-                        "mentions": row[3],
-                        "renoteId": row[4],
-                        "replyId": row[5],
-                        "fileIds": row[6] if row[6] is not None else [],
-                        "hasPoll": row[7],
-                        "isFlagged": row[8]
-                    }
+            notes_info = {}
+            for row in results:
+                notes_info[row[0]] = {
+                    "id": row[0],
+                    "userId": row[1],
+                    "host": row[2],
+                    "mentions": row[3],
+                    "renoteId": row[4],
+                    "replyId": row[5],
+                    "fileIds": row[6] if row[6] is not None else [],
+                    "hasPoll": row[7],
+                    "isFlagged": row[8]
+                }
 
-                return notes_info
+            return notes_info
 
-            except Exception as e:
-                retry_count += 1
-                print(f"获取帖子批次时发生查询异常 (尝试 {retry_count}/{max_retries}): {str(e)}")
-                
-                try:
-                    # 尝试重新连接
-                    self.db_conn.rollback()  # 回滚任何未完成的事务
-                    if hasattr(self, 'db_conn'):
-                        if not self.db_conn.closed:
-                            self.db_cursor = self.db_conn.cursor()
-                        else:
-                            raise Exception("Database connection is closed")
-                    
-                    if retry_count == max_retries:
-                        print("达到最大重试次数，返回空结果")
-                        return {}
-                        
-                except Exception as conn_error:
-                    print(f"重新初始化连接失败: {str(conn_error)}")
-                    if retry_count == max_retries:
-                        return {}
-
-        return {}
+        except Exception:
+            return {}
 
     def analyze_notes_batch(self, note_ids, end_id, redis_conn: RedisConnection, file_manager, batch_size=100):
         """

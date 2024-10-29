@@ -88,7 +88,7 @@ class NoteManager:
                         n.id,
                         n."userId",
                         n."userHost",
-                        n.mentions,
+                        n."mentions",
                         n."renoteId",
                         n."replyId",
                         n."fileIds",
@@ -103,7 +103,7 @@ class NoteManager:
 
                 # 检查查询是否成功执行
                 if self.db_cursor.description is None:
-                    raise Exception("Query execution failed")
+                    return {}
 
                 results = self.db_cursor.fetchall()
                 # 如果是空结果集，直接返回空字典，不需要重试

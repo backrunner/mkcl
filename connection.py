@@ -1,4 +1,5 @@
 
+import psycopg
 import psycopg_pool
 from contextlib import contextmanager
 from redis import ConnectionPool, Redis

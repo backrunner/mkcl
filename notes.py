@@ -303,7 +303,7 @@ class NoteManager:
             while to_process:
                 current_batch = list(to_process)[:batch_size]
                 notes_info = self.get_notes_batch(current_batch)
-                
+
                 for note_id, info in notes_info.items():
                     local_related_notes[note_id] = info
                     processed.add(note_id)

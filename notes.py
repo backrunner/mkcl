@@ -55,55 +55,76 @@ class NoteManager:
         if not note_ids:
             return {}
 
-        # 使用CTE优化查询
-        self.db_cursor.execute(
-            """
-            WITH flagged_notes AS (
-                SELECT DISTINCT "noteId"
-                FROM (
-                    SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s)
-                    UNION ALL
-                    SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s)
-                    UNION ALL
-                    SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s)
-                    UNION ALL
-                    SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s)
-                    UNION ALL
-                    SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s)
-                ) combined_flags
+        try:
+            # 确保 note_ids 是列表类型
+            note_ids = list(note_ids)
+            
+            # 使用CTE优化查询
+            self.db_cursor.execute(
+                """
+                WITH flagged_notes AS (
+                    SELECT DISTINCT "noteId"
+                    FROM (
+                        SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s)
+                        UNION ALL
+                        SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s)
+                        UNION ALL
+                        SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s)
+                        UNION ALL
+                        SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s)
+                        UNION ALL
+                        SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s)
+                    ) combined_flags
+                )
+                SELECT
+                    n.id,
+                    n."userId",
+                    n."userHost",
+                    n.mentions,
+                    n."renoteId",
+                    n."replyId",
+                    n."fileIds",
+                    n."hasPoll",
+                    CASE WHEN fn."noteId" IS NOT NULL THEN TRUE ELSE FALSE END as "isFlagged"
+                FROM note n
+                LEFT JOIN flagged_notes fn ON n.id = fn."noteId"
+                WHERE n.id = ANY(%s)
+                """,
+                [note_ids, note_ids, note_ids, note_ids, note_ids, note_ids]
             )
-            SELECT
-                n.id,
-                n."userId",
-                n."userHost",
-                n.mentions,
-                n."renoteId",
-                n."replyId",
-                n."fileIds",
-                n."hasPoll",
-                CASE WHEN fn."noteId" IS NOT NULL THEN TRUE ELSE FALSE END as "isFlagged"
-            FROM note n
-            LEFT JOIN flagged_notes fn ON n.id = fn."noteId"
-            WHERE n.id = ANY(%s)
-            """,
-            [note_ids, note_ids, note_ids, note_ids, note_ids, note_ids]
-        )
 
-        notes_info = {}
-        for row in self.db_cursor.fetchall():
-            notes_info[row[0]] = {
-                "id": row[0],
-                "userId": row[1],
-                "host": row[2],
-                "mentions": row[3],
-                "renoteId": row[4],
-                "replyId": row[5],
-                "fileIds": row[6] or [],
-                "hasPoll": row[7],
-                "isFlagged": row[8]
-            }
+            # 检查游标是否有效
+            if self.db_cursor is None or not hasattr(self.db_cursor, 'fetchall'):
+                print("警告：数据库游标无效")
+                return {}
 
-        return notes_info
+            notes_info = {}
+            results = self.db_cursor.fetchall()
+            if results:
+                for row in results:
+                    notes_info[row[0]] = {
+                        "id": row[0],
+                        "userId": row[1],
+                        "host": row[2],
+                        "mentions": row[3],
+                        "renoteId": row[4],
+                        "replyId": row[5],
+                        "fileIds": row[6] if row[6] is not None else [],
+                        "hasPoll": row[7],
+                        "isFlagged": row[8]
+                    }
+
+            return notes_info
+
+        except Exception as e:
+            print(f"获取帖子批次时发生错误: {str(e)}")
+            # 如果发生错误，尝试重新初始化连接
+            try:
+                if hasattr(self, 'db_conn'):
+                    self.db_cursor = self.db_conn.cursor()
+            except Exception as conn_error:
+                print(f"重新初始化连接失败: {str(conn_error)}")
+            return {}
 
     def analyze_notes_batch(self, note_ids, end_id, redis_conn: RedisConnection, file_manager, batch_size=100):
         """
@@ -280,14 +301,28 @@ class NoteManager:
             while to_process:
                 current_batch = list(to_process)[:batch_size]
                 notes_info = self.get_notes_batch(current_batch)
+                
+                # 检查 notes_info 是否有效
+                if not notes_info or not isinstance(notes_info, dict):
+                    print(f"警告：获取批次 {current_batch} 的笔记信息失败")
+                    # 将当前批次标记为已处理，避免无限循环
+                    processed.update(current_batch)
+                    to_process = to_process - processed
+                    continue
 
                 for note_id, info in notes_info.items():
+                    # 确保 info 包含所需的所有键
+                    if not all(key in info for key in ["renoteId", "replyId"]):
+                        print(f"警告：笔记 {note_id} 的信息不完整")
+                        continue
+                        
                     local_related_notes[note_id] = info
                     processed.add(note_id)
 
-                    if info["renoteId"] and info["renoteId"] not in processed:
+                    # 安全地检查和添加关联笔记
+                    if info.get("renoteId") and info["renoteId"] not in processed:
                         to_process.add(info["renoteId"])
-                    if info["replyId"] and info["replyId"] not in processed:
+                    if info.get("replyId") and info["replyId"] not in processed:
                         to_process.add(info["replyId"])
 
                 to_process = to_process - processed

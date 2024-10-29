@@ -25,16 +25,16 @@ class FileManager:
         try:
             if not file_id:
                 return 0
-                
+
             self.db_cursor.execute("""
                 SELECT COUNT(*)
                 FROM note
                 WHERE %s = ANY("fileIds");
             """, [file_id])
-            
+
             result = self.db_cursor.fetchone()
             return result[0] if result else 0
-            
+
         except Exception as e:
             print(f"获取文件引用数量失败 (file_id: {file_id}): {str(e)}")
             return 0
@@ -46,23 +46,23 @@ class FileManager:
         try:
             if not file_id:
                 return False
-                
+
             self.db_cursor.execute("""
-                SELECT "isLink" 
-                FROM drive_file 
+                SELECT "isLink"
+                FROM drive_file
                 WHERE id = %s;
             """, [file_id])
-            
+
             result = self.db_cursor.fetchone()
             return result[0] if result and result[0] is not None else False
-            
+
         except Exception as e:
             print(f"检查文件是否本地存储失败 (file_id: {file_id}): {str(e)}")
             return False
 
     def get_single_files(self, start_date, end_date, redis_conn: RedisConnection):
         """
-        获取在一段时间内所有的单独文件id列表
+        获取在一段时间内所有的单独文件id列表，使用批量查询优化
         """
         start_id = generate_id(int(start_date.timestamp() * 1000))
         end_id = generate_id(int(end_date.timestamp() * 1000))
@@ -71,42 +71,60 @@ class FileManager:
         # 首先获取总数
         self.db_cursor.execute(
             '''SELECT COUNT(*) FROM drive_file
-            WHERE drive_file."id" BETWEEN %s AND %s AND drive_file."isLink" IS TRUE
-            AND drive_file."userHost" IS NOT NULL''',
+            WHERE id BETWEEN %s AND %s
+            AND "isLink" IS TRUE
+            AND "userHost" IS NOT NULL''',
             [start_id, end_id]
         )
         total_count = self.db_cursor.fetchone()[0]
 
-        page = 0
         processed = 0
         deleted = 0
-        batch_size = 100
+        batch_size = 1000  # 增加批处理大小
+        last_id = start_id
 
         with tqdm(total=total_count, desc="扫描单独文件") as pbar:
             while processed < total_count:
                 self.db_cursor.execute(
-                    '''SELECT drive_file."id" FROM drive_file
-                    WHERE drive_file."id" BETWEEN %s AND %s AND drive_file."isLink" IS TRUE
-                    AND drive_file."userHost" IS NOT NULL LIMIT %s OFFSET %s''',
-                    [start_id, end_id, batch_size, page * batch_size]
+                    '''SELECT id
+                    FROM drive_file
+                    WHERE id >= %s
+                    AND id <= %s
+                    AND "isLink" IS TRUE
+                    AND "userHost" IS NOT NULL
+                    ORDER BY id
+                    LIMIT %s''',
+                    [last_id, end_id, batch_size]
                 )
                 results = self.db_cursor.fetchall()
                 if not results:
                     break
 
                 file_ids = [result[0] for result in results]
-                for file_id in file_ids:
-                    if redis_conn.execute(lambda: redis_conn.client.sismember('file_cache', file_id)):
-                        continue
-                    if self.check_file_single(file_id):
-                        redis_conn.execute(
-                            lambda: redis_conn.client.sadd('files_to_delete', file_id)
-                        )
-                        deleted += 1
+                last_id = file_ids[-1]
+
+                # 过滤掉已缓存的文件ID
+                uncached_file_ids = [
+                    fid for fid in file_ids
+                    if not redis_conn.execute(lambda: redis_conn.client.sismember('file_cache', fid))
+                ]
+
+                if uncached_file_ids:
+                    # 批量获取文件引用
+                    file_refs = self.get_file_references_batch(uncached_file_ids)
+                    # 批量检查头像和横幅使用
+                    avatar_banner_files = self.check_user_avatar_banner_batch(uncached_file_ids)
+
+                    # 找出单独文件
+                    for file_id in uncached_file_ids:
+                        if file_refs.get(file_id, 0) == 0 and file_id not in avatar_banner_files:
+                            redis_conn.execute(
+                                lambda: redis_conn.client.sadd('files_to_delete', file_id)
+                            )
+                            deleted += 1
 
                 current_batch_size = len(file_ids)
                 processed += current_batch_size
-                page += 1
 
                 pbar.update(current_batch_size)
                 pbar.set_postfix({
@@ -115,19 +133,6 @@ class FileManager:
                 })
 
         print(f"\n找到 {deleted} 个单独文件需要删除")
-
-    def check_file_single(self, file_id):
-        """
-        判断是否为单独文件
-        """
-        if self.get_file_references(file_id) > 0:
-            return False
-        self.db_cursor.execute(
-            """SELECT "id" FROM public.user WHERE public.user."avatarId" = %s OR public.user."bannerId" = %s LIMIT 1;""",
-            [file_id, file_id]
-        )
-        results = self.db_cursor.fetchall()
-        return len(results) == 0
 
     def get_file_references_batch(self, file_ids):
         """
@@ -139,7 +144,7 @@ class FileManager:
         try:
             # 确保 file_ids 是列表类型
             file_ids = list(file_ids)
-            
+
             self.db_cursor.execute(
                 """
                 WITH file_refs AS (
@@ -154,7 +159,7 @@ class FileManager:
                 """,
                 [file_ids, file_ids]
             )
-            
+
             # 检查游标是否有效
             if self.db_cursor is None or not hasattr(self.db_cursor, 'fetchall'):
                 print("警告：数据库游标无效")
@@ -163,9 +168,9 @@ class FileManager:
             results = self.db_cursor.fetchall()
             if not results:
                 return {}
-                
+
             return dict(results)
-            
+
         except Exception as e:
             print(f"批量获取文件引用数失败: {str(e)}")
             # 尝试重新初始化连接
@@ -185,7 +190,7 @@ class FileManager:
         try:
             # 确保 file_ids 是列表类型
             file_ids = list(file_ids)
-            
+
             self.db_cursor.execute(
                 """
                 SELECT id, "isLink", "userHost"
@@ -194,7 +199,7 @@ class FileManager:
                 """,
                 [file_ids]
             )
-            
+
             # 检查游标是否有效
             if self.db_cursor is None or not hasattr(self.db_cursor, 'fetchall'):
                 print("警告：数据库游标无效")
@@ -203,7 +208,7 @@ class FileManager:
             results = self.db_cursor.fetchall()
             if not results:
                 return {}
-                
+
             return {
                 row[0]: {
                     "isLink": row[1] if row[1] is not None else False,
@@ -211,7 +216,7 @@ class FileManager:
                 }
                 for row in results
             }
-            
+
         except Exception as e:
             print(f"批量获取文件信息失败: {str(e)}")
             # 尝试重新初始化连接
@@ -231,7 +236,7 @@ class FileManager:
         try:
             # 确保 file_ids 是列表类型
             file_ids = list(file_ids)
-            
+
             self.db_cursor.execute(
                 """
                 SELECT DISTINCT "avatarId", "bannerId"
@@ -240,7 +245,7 @@ class FileManager:
                 """,
                 [file_ids, file_ids]
             )
-            
+
             # 检查游标是否有效
             if self.db_cursor is None or not hasattr(self.db_cursor, 'fetchall'):
                 print("警告：数据库游标无效")
@@ -249,7 +254,7 @@ class FileManager:
             results = self.db_cursor.fetchall()
             if not results:
                 return set()
-                
+
             used_files = set()
             for avatar_id, banner_id in results:
                 if avatar_id:
@@ -257,7 +262,7 @@ class FileManager:
                 if banner_id:
                     used_files.add(banner_id)
             return used_files
-            
+
         except Exception as e:
             print(f"批量检查用户头像和横幅失败: {str(e)}")
             # 尝试重新初始化连接

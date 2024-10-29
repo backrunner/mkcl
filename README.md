@@ -62,7 +62,8 @@ CREATE INDEX IF NOT EXISTS "idx_user_host_composite" ON public.user (host, "foll
 CREATE INDEX IF NOT EXISTS "idx_user_id_host_counts" ON public.user (id, host, "followersCount", "followingCount");
 
 -- drive_file表索引
-CREATE INDEX IF NOT EXISTS "idx_drive_file_composite" ON drive_file (id, "isLink", "userHost");
+CREATE INDEX IF NOT EXISTS "idx_drive_file_link_host_id_btree" ON drive_file (id)
+WHERE "isLink" IS TRUE AND "userHost" IS NOT NULL;
 
 -- 帖子分析优化索引
 CREATE INDEX IF NOT EXISTS "idx_note_userid_composite" ON note ("userId", "userHost", "hasPoll")

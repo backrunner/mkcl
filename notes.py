@@ -71,16 +71,16 @@ class NoteManager:
             self.db_cursor.execute(
                 """
                 WITH flag_status AS (
-                    SELECT "noteId", TRUE as is_flagged
+                    SELECT DISTINCT "noteId", TRUE as is_flagged
                     FROM (
                         SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s)
-                        UNION
+                        UNION ALL
                         SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s)
-                        UNION
+                        UNION ALL
                         SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s)
-                        UNION
+                        UNION ALL
                         SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s)
-                        UNION
+                        UNION ALL
                         SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s)
                     ) combined_flags
                 )

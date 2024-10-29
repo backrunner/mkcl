@@ -302,20 +302,7 @@ class NoteManager:
                 current_batch = list(to_process)[:batch_size]
                 notes_info = self.get_notes_batch(current_batch)
                 
-                # 检查 notes_info 是否有效
-                if not notes_info or not isinstance(notes_info, dict):
-                    print(f"警告：获取批次 {current_batch} 的笔记信息失败")
-                    # 将当前批次标记为已处理，避免无限循环
-                    processed.update(current_batch)
-                    to_process = to_process - processed
-                    continue
-
                 for note_id, info in notes_info.items():
-                    # 确保 info 包含所需的所有键
-                    if not all(key in info for key in ["renoteId", "replyId"]):
-                        print(f"警告：笔记 {note_id} 的信息不完整")
-                        continue
-                        
                     local_related_notes[note_id] = info
                     processed.add(note_id)
 

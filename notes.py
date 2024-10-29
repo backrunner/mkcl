@@ -62,17 +62,17 @@ class NoteManager:
             # 使用CTE优化查询
             self.db_cursor.execute(
                 """
-                WITH flagged_notes AS (
-                    SELECT DISTINCT "noteId"
+                WITH flag_status AS (
+                    SELECT "noteId", TRUE as is_flagged
                     FROM (
                         SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s)
-                        UNION ALL
+                        UNION
                         SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s)
-                        UNION ALL
+                        UNION
                         SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s)
-                        UNION ALL
+                        UNION
                         SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s)
-                        UNION ALL
+                        UNION
                         SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s)
                     ) combined_flags
                 )
@@ -85,18 +85,13 @@ class NoteManager:
                     n."replyId",
                     n."fileIds",
                     n."hasPoll",
-                    CASE WHEN fn."noteId" IS NOT NULL THEN TRUE ELSE FALSE END as "isFlagged"
+                    COALESCE(f.is_flagged, FALSE) as "isFlagged"
                 FROM note n
-                LEFT JOIN flagged_notes fn ON n.id = fn."noteId"
+                LEFT JOIN flag_status f ON n.id = f."noteId"
                 WHERE n.id = ANY(%s)
                 """,
                 [note_ids, note_ids, note_ids, note_ids, note_ids, note_ids]
             )
-
-            # 检查游标是否有效
-            if self.db_cursor is None or not hasattr(self.db_cursor, 'fetchall'):
-                print("警告：数据库游标无效")
-                return {}
 
             notes_info = {}
             results = self.db_cursor.fetchall()

@@ -11,24 +11,54 @@ class FileManager:
         """
         初始化数据库游标
         """
-        self.db_cursor = db_connection.cursor()
-        self.db_conn = db_connection
+        try:
+            self.db_conn = db_connection
+            self.db_cursor = db_connection.cursor()
+        except Exception as e:
+            print(f"初始化文件管理器失败: {str(e)}")
+            raise
 
     def get_file_references(self, file_id):
         """
         获取媒体文件引用数量
         """
-        self.db_cursor.execute("""SELECT id FROM note WHERE %s = ANY("fileIds");""", [file_id])
-        results = self.db_cursor.fetchall()
-        return len(results)
+        try:
+            if not file_id:
+                return 0
+                
+            self.db_cursor.execute("""
+                SELECT COUNT(*)
+                FROM note
+                WHERE %s = ANY("fileIds");
+            """, [file_id])
+            
+            result = self.db_cursor.fetchone()
+            return result[0] if result else 0
+            
+        except Exception as e:
+            print(f"获取文件引用数量失败 (file_id: {file_id}): {str(e)}")
+            return 0
 
     def is_file_local(self, file_id):
         """
         判断是否为本地存储文件
         """
-        self.db_cursor.execute("""SELECT "isLink" FROM drive_file WHERE id = %s;""", [file_id])
-        result = self.db_cursor.fetchone()
-        return result[0]
+        try:
+            if not file_id:
+                return False
+                
+            self.db_cursor.execute("""
+                SELECT "isLink" 
+                FROM drive_file 
+                WHERE id = %s;
+            """, [file_id])
+            
+            result = self.db_cursor.fetchone()
+            return result[0] if result and result[0] is not None else False
+            
+        except Exception as e:
+            print(f"检查文件是否本地存储失败 (file_id: {file_id}): {str(e)}")
+            return False
 
     def get_single_files(self, start_date, end_date, redis_conn: RedisConnection):
         """
@@ -106,21 +136,44 @@ class FileManager:
         if not file_ids:
             return {}
 
-        self.db_cursor.execute(
-            """
-            WITH file_refs AS (
-                SELECT unnest(n."fileIds") as file_id, count(*) as ref_count
-                FROM note n
-                WHERE n."fileIds" && %s
-                GROUP BY unnest(n."fileIds")
+        try:
+            # 确保 file_ids 是列表类型
+            file_ids = list(file_ids)
+            
+            self.db_cursor.execute(
+                """
+                WITH file_refs AS (
+                    SELECT unnest(n."fileIds") as file_id, count(*) as ref_count
+                    FROM note n
+                    WHERE n."fileIds" && %s
+                    GROUP BY unnest(n."fileIds")
+                )
+                SELECT f.id, COALESCE(fr.ref_count, 0) as ref_count
+                FROM unnest(%s::text[]) as f(id)
+                LEFT JOIN file_refs fr ON fr.file_id = f.id
+                """,
+                [file_ids, file_ids]
             )
-            SELECT f.id, COALESCE(fr.ref_count, 0) as ref_count
-            FROM unnest(%s::text[]) as f(id)
-            LEFT JOIN file_refs fr ON fr.file_id = f.id
-            """,
-            [file_ids, file_ids]
-        )
-        return dict(self.db_cursor.fetchall())
+            
+            # 检查游标是否有效
+            if self.db_cursor is None or not hasattr(self.db_cursor, 'fetchall'):
+                print("警告：数据库游标无效")
+                return {}
+
+            results = self.db_cursor.fetchall()
+            if not results:
+                return {}
+                
+            return dict(results)
+            
+        except Exception as e:
+            print(f"批量获取文件引用数失败: {str(e)}")
+            # 尝试重新初始化连接
+            try:
+                self.db_cursor = self.db_conn.cursor()
+            except Exception as conn_error:
+                print(f"重新初始化连接失败: {str(conn_error)}")
+            return {}
 
     def get_files_info_batch(self, file_ids):
         """
@@ -129,16 +182,44 @@ class FileManager:
         if not file_ids:
             return {}
 
-        self.db_cursor.execute(
-            """
-            SELECT id, "isLink", "userHost"
-            FROM drive_file
-            WHERE id = ANY(%s)
-            """,
-            [file_ids]
-        )
-        return {row[0]: {"isLink": row[1], "userHost": row[2]}
-                for row in self.db_cursor.fetchall()}
+        try:
+            # 确保 file_ids 是列表类型
+            file_ids = list(file_ids)
+            
+            self.db_cursor.execute(
+                """
+                SELECT id, "isLink", "userHost"
+                FROM drive_file
+                WHERE id = ANY(%s)
+                """,
+                [file_ids]
+            )
+            
+            # 检查游标是否有效
+            if self.db_cursor is None or not hasattr(self.db_cursor, 'fetchall'):
+                print("警告：数据库游标无效")
+                return {}
+
+            results = self.db_cursor.fetchall()
+            if not results:
+                return {}
+                
+            return {
+                row[0]: {
+                    "isLink": row[1] if row[1] is not None else False,
+                    "userHost": row[2]
+                }
+                for row in results
+            }
+            
+        except Exception as e:
+            print(f"批量获取文件信息失败: {str(e)}")
+            # 尝试重新初始化连接
+            try:
+                self.db_cursor = self.db_conn.cursor()
+            except Exception as conn_error:
+                print(f"重新初始化连接失败: {str(conn_error)}")
+            return {}
 
     def check_user_avatar_banner_batch(self, file_ids):
         """
@@ -147,21 +228,44 @@ class FileManager:
         if not file_ids:
             return set()
 
-        self.db_cursor.execute(
-            """
-            SELECT DISTINCT "avatarId", "bannerId"
-            FROM public.user
-            WHERE "avatarId" = ANY(%s) OR "bannerId" = ANY(%s)
-            """,
-            [file_ids, file_ids]
-        )
-        used_files = set()
-        for avatar_id, banner_id in self.db_cursor.fetchall():
-            if avatar_id:
-                used_files.add(avatar_id)
-            if banner_id:
-                used_files.add(banner_id)
-        return used_files
+        try:
+            # 确保 file_ids 是列表类型
+            file_ids = list(file_ids)
+            
+            self.db_cursor.execute(
+                """
+                SELECT DISTINCT "avatarId", "bannerId"
+                FROM public.user
+                WHERE "avatarId" = ANY(%s) OR "bannerId" = ANY(%s)
+                """,
+                [file_ids, file_ids]
+            )
+            
+            # 检查游标是否有效
+            if self.db_cursor is None or not hasattr(self.db_cursor, 'fetchall'):
+                print("警告：数据库游标无效")
+                return set()
+
+            results = self.db_cursor.fetchall()
+            if not results:
+                return set()
+                
+            used_files = set()
+            for avatar_id, banner_id in results:
+                if avatar_id:
+                    used_files.add(avatar_id)
+                if banner_id:
+                    used_files.add(banner_id)
+            return used_files
+            
+        except Exception as e:
+            print(f"批量检查用户头像和横幅失败: {str(e)}")
+            # 尝试重新初始化连接
+            try:
+                self.db_cursor = self.db_conn.cursor()
+            except Exception as conn_error:
+                print(f"重新初始化连接失败: {str(conn_error)}")
+            return set()
 
     def delete_files_batch(self, file_ids: list[str], batch_size: int = 1000) -> None:
         """

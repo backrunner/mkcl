@@ -79,11 +79,18 @@ class NoteManager:
             )
 
             # 批量插入IDs到临时表
-            args = ','.join(self.db_cursor.mogrify("(%s)", (id_,)).decode('utf-8')
-                          for id_ in note_ids)
+            # 使用参数化查询替代mogrify方法
+            placeholders = []
+            values = []
+            for id_ in note_ids:
+                placeholders.append('(%s)')
+                values.append(id_)
+
+            args = ','.join(placeholders)
             if args:
                 self.db_cursor.execute(
-                    f"INSERT INTO temp_note_ids (id) VALUES {args} ON CONFLICT DO NOTHING"
+                    f"INSERT INTO temp_note_ids (id) VALUES {args} ON CONFLICT DO NOTHING",
+                    values
                 )
 
             # 使用优化的CTE进行查询

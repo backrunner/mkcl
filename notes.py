@@ -67,22 +67,49 @@ class NoteManager:
             # 确保 note_ids 是列表类型
             note_ids = list(note_ids)
 
-            # 使用CTE优化查询
+            # 创建一个临时表存储要查询的ID，避免重复传递参数
             self.db_cursor.execute(
                 """
-                WITH flag_status AS (
-                    SELECT DISTINCT "noteId", TRUE as is_flagged
+                CREATE TEMPORARY TABLE IF NOT EXISTS temp_note_ids (
+                    id TEXT PRIMARY KEY
+                ) ON COMMIT DROP;
+                
+                TRUNCATE temp_note_ids;
+                """
+            )
+            
+            # 批量插入IDs到临时表
+            args = ','.join(self.db_cursor.mogrify("(%s)", (id_,)).decode('utf-8') 
+                          for id_ in note_ids)
+            if args:
+                self.db_cursor.execute(
+                    f"INSERT INTO temp_note_ids (id) VALUES {args} ON CONFLICT DO NOTHING"
+                )
+            
+            # 使用优化的CTE进行查询
+            self.db_cursor.execute(
+                """
+                WITH flag_counts AS (
+                    SELECT 
+                        "noteId", 
+                        COUNT(*) > 0 as is_flagged
                     FROM (
-                        SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s)
-                        UNION ALL
-                        SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s)
-                        UNION ALL
-                        SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s)
-                        UNION ALL
-                        SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s)
-                        UNION ALL
-                        SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s)
+                        SELECT "noteId" FROM note_reaction 
+                        WHERE "noteId" IN (SELECT id FROM temp_note_ids)
+                        UNION 
+                        SELECT "noteId" FROM note_favorite 
+                        WHERE "noteId" IN (SELECT id FROM temp_note_ids)
+                        UNION 
+                        SELECT "noteId" FROM clip_note 
+                        WHERE "noteId" IN (SELECT id FROM temp_note_ids)
+                        UNION 
+                        SELECT "noteId" FROM note_unread 
+                        WHERE "noteId" IN (SELECT id FROM temp_note_ids)
+                        UNION 
+                        SELECT "noteId" FROM note_watching 
+                        WHERE "noteId" IN (SELECT id FROM temp_note_ids)
                     ) combined_flags
+                    GROUP BY "noteId"
                 )
                 SELECT
                     n.id,
@@ -95,10 +122,9 @@ class NoteManager:
                     n."hasPoll",
                     COALESCE(f.is_flagged, FALSE) as "isFlagged"
                 FROM note n
-                LEFT JOIN flag_status f ON n.id = f."noteId"
-                WHERE n.id = ANY(%s)
-                """,
-                [note_ids, note_ids, note_ids, note_ids, note_ids, note_ids]
+                JOIN temp_note_ids t ON n.id = t.id
+                LEFT JOIN flag_counts f ON n.id = f."noteId"
+                """
             )
 
             # 检查查询是否成功执行
@@ -125,7 +151,8 @@ class NoteManager:
 
             return notes_info
 
-        except Exception:
+        except Exception as e:
+            print(f"获取note信息出错: {str(e)}")
             return {}
 
     def analyze_notes_batch(self, note_ids, end_id, redis_conn: RedisConnection, file_manager, batch_size=100):
@@ -254,46 +281,78 @@ class NoteManager:
         if not note_ids:
             return
 
-        # 先检查note_history表是否存在
-        self.db_cursor.execute(
-            """
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables
-                WHERE table_schema = 'public'
-                AND table_name = 'note_history'
+        # 检查数据库模式，这个只需要检查一次
+        if not hasattr(self, '_schema_checked'):
+            # 检查相关表是否存在
+            self.db_cursor.execute(
+                """
+                SELECT table_name 
+                FROM information_schema.tables
+                WHERE table_schema = 'public' 
+                AND table_name IN ('note_history', 'note_reaction', 'note_favorite', 
+                                  'note_unread', 'note_watching', 'clip_note')
+                """
             )
-            """
-        )
-        note_history_exists = self.db_cursor.fetchone()[0]
+            existing_tables = {row[0] for row in self.db_cursor.fetchall()}
+            self._schema_checked = True
+            self._note_history_exists = 'note_history' in existing_tables
+            self._related_tables = [
+                table for table in ['note_reaction', 'note_favorite', 'note_unread', 
+                                   'note_watching', 'clip_note'] 
+                if table in existing_tables
+            ]
 
-        # 如果note_history表存在，先删除note_history表中的关联记录
-        if note_history_exists:
+        # 使用单个事务删除所有相关数据
+        try:
+            # 开始事务
+            self.db_conn.autocommit = False
+            
+            # 1. 删除关联表中的数据
+            for table in getattr(self, '_related_tables', []):
+                self.db_cursor.execute(
+                    f"""
+                    WITH batch_ids AS (
+                        SELECT unnest(%s::text[]) AS id
+                    )
+                    DELETE FROM {table}
+                    WHERE "noteId" = ANY(%s)
+                    """,
+                    [note_ids, note_ids]
+                )
+            
+            # 2. 如果note_history表存在，删除note_history表中的关联记录
+            if getattr(self, '_note_history_exists', False):
+                self.db_cursor.execute(
+                    """
+                    WITH batch_ids AS (
+                        SELECT unnest(%s::text[]) AS id
+                    )
+                    DELETE FROM note_history nh
+                    WHERE nh."targetId" = ANY(%s)
+                    """,
+                    [note_ids, note_ids]
+                )
+
+            # 3. 删除note表中的记录
             self.db_cursor.execute(
                 """
                 WITH batch_ids AS (
                     SELECT unnest(%s::text[]) AS id
                 )
-                DELETE FROM note_history nh
-                USING batch_ids b
-                WHERE nh."targetId" = b.id
+                DELETE FROM note n
+                WHERE n.id = ANY(%s)
                 """,
-                [note_ids]
+                [note_ids, note_ids]
             )
 
-        # 再删除note表中的记录
-        self.db_cursor.execute(
-            """
-            WITH batch_ids AS (
-                SELECT unnest(%s::text[]) AS id
-            )
-            DELETE FROM note n
-            USING batch_ids b
-            WHERE n.id = b.id
-            """,
-            [note_ids]
-        )
-
-        self.db_conn.commit()
+            # 提交事务
+            self.db_conn.commit()
+        except Exception as e:
+            self.db_conn.rollback()
+            raise e
+        finally:
+            # 恢复自动提交
+            self.db_conn.autocommit = True
 
     def analyze_notes_batch_parallel(self, note_ids: List[str], end_id: str,
                                    redis_conn: RedisConnection, file_manager,
@@ -383,22 +442,29 @@ class NoteManager:
             for future in as_completed(future_to_batch):
                 total_deleted += future.result()
 
-        # 处理用户状态
-        pipeline = redis_conn.pipeline()
-        for user_id in self.all_user_ids:
-            pipeline.hget('user_cache', user_id)
-
-        try:
-            user_results = dict(zip(self.all_user_ids, redis_conn.execute(
-                lambda: pipeline.execute()
-            )))
-        except (ConnectionError, TimeoutError):
+        # 处理用户状态 - 批量获取
+        user_results = {}
+        
+        # 分批获取用户缓存，每次最多1000个
+        user_batches = [list(self.all_user_ids)[i:i+1000] 
+                       for i in range(0, len(self.all_user_ids), 1000)]
+        
+        for user_batch in user_batches:
             pipeline = redis_conn.pipeline()
-            for user_id in self.all_user_ids:
+            for user_id in user_batch:
                 pipeline.hget('user_cache', user_id)
-            user_results = dict(zip(self.all_user_ids, redis_conn.execute(
-                lambda: pipeline.execute()
-            )))
+            
+            try:
+                batch_results = redis_conn.execute(lambda: pipeline.execute())
+                user_results.update(dict(zip(user_batch, batch_results)))
+            except (ConnectionError, TimeoutError):
+                # 如果执行失败，逐个重试
+                for user_id in user_batch:
+                    try:
+                        result = redis_conn.execute(lambda: redis_conn.client.hget('user_cache', user_id))
+                        user_results[user_id] = result
+                    except:
+                        user_results[user_id] = None
 
         # 处理未缓存的用户
         uncached_users = {
@@ -407,21 +473,32 @@ class NoteManager:
         }
 
         if uncached_users:
-            self.db_cursor.execute(
-                """
-                SELECT id, host, "followersCount", "followingCount"
-                FROM public.user
-                WHERE id = ANY(%s)
-                """,
-                [list(uncached_users)]
-            )
-
-            pipeline = redis_conn.pipeline()
-            for user_id, host, followers, following in self.db_cursor.fetchall():
-                is_important = (host is None) or (followers + following > 0)
-                user_results[user_id] = str(is_important)
-                pipeline.hset('user_cache', user_id, str(is_important))
-            pipeline.execute()
+            # 分批处理
+            uncached_batches = [list(uncached_users)[i:i+500] 
+                              for i in range(0, len(uncached_users), 500)]
+            
+            for uncached_batch in uncached_batches:
+                self.db_cursor.execute(
+                    """
+                    SELECT id, host, "followersCount", "followingCount"
+                    FROM public.user
+                    WHERE id = ANY(%s)
+                    """,
+                    [uncached_batch]
+                )
+                
+                # 批量更新Redis
+                pipeline = redis_conn.pipeline()
+                for user_id, host, followers, following in self.db_cursor.fetchall():
+                    is_important = (host is None) or (followers + following > 0)
+                    user_results[user_id] = str(is_important)
+                    pipeline.hset('user_cache', user_id, str(is_important))
+                
+                if pipeline:
+                    try:
+                        pipeline.execute()
+                    except:
+                        pass  # 忽略Redis错误，继续处理
 
         # 根据用户状态过滤需要保留的note
         for note_id in list(self.notes_to_delete):
@@ -429,32 +506,44 @@ class NoteManager:
             if user_results.get(note_info["userId"]) == 'True':
                 self.notes_to_delete.remove(note_id)
 
-        # 处理文件
+        # 处理文件 - 批量处理
         if self.files_to_process:
-            file_refs = file_manager.get_file_references_batch(
-                list(self.files_to_process))
-            files_info = file_manager.get_files_info_batch(
-                list(self.files_to_process))
-            used_as_avatar_banner = file_manager.check_user_avatar_banner_batch(
-                list(self.files_to_process))
+            file_list = list(self.files_to_process)
+            file_refs = file_manager.get_file_references_batch(file_list)
+            files_info = file_manager.get_files_info_batch(file_list)
+            used_as_avatar_banner = file_manager.check_user_avatar_banner_batch(file_list)
 
-            pipeline = redis_conn.pipeline()
-            for file_id in self.files_to_process:
+            # 批量更新Redis
+            files_to_keep = []
+            files_to_delete = []
+            
+            for file_id in file_list:
                 if (file_id in used_as_avatar_banner or
                     file_refs.get(file_id, 0) > 1 or
                     not files_info.get(file_id, {}).get("isLink", False)):
-                    pipeline.sadd('files_to_keep', file_id)
+                    files_to_keep.append(file_id)
                 else:
-                    pipeline.sadd('files_to_delete', file_id)
+                    files_to_delete.append(file_id)
+            
+            # 使用管道批量添加
+            if files_to_keep:
+                redis_conn.execute(lambda: redis_conn.client.sadd('files_to_keep', *files_to_keep))
+            
+            if files_to_delete:
+                redis_conn.execute(lambda: redis_conn.client.sadd('files_to_delete', *files_to_delete))
 
-            redis_conn.execute(lambda: pipeline.execute())
-
-        # 更新Redis
-        pipeline = redis_conn.pipeline()
-        for note_id in self.notes_to_delete:
-            pipeline.sadd('notes_to_delete', note_id)
-        for note_id in note_ids:
-            pipeline.srem('note_list', note_id)
-        redis_conn.execute(lambda: pipeline.execute())
+        # 更新Redis - 批量操作
+        if self.notes_to_delete:
+            delete_list = list(self.notes_to_delete)
+            # 分批添加到notes_to_delete，每次最多1000个
+            for i in range(0, len(delete_list), 1000):
+                batch = delete_list[i:i+1000]
+                redis_conn.execute(lambda: redis_conn.client.sadd('notes_to_delete', *batch))
+        
+        if note_ids:
+            # 分批从note_list移除，每次最多1000个
+            for i in range(0, len(note_ids), 1000):
+                batch = note_ids[i:i+1000]
+                redis_conn.execute(lambda: redis_conn.client.srem('note_list', *batch))
 
         return len(self.notes_to_delete)

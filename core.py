@@ -36,24 +36,24 @@ def clean_data(db_info, redis_info, start_date, end_date):
         note_manager = NoteManager(db_conn)
         file_manager = FileManager(db_conn)
 
-        print("\n步骤 1/5: 收集需要处理的帖子...")
+        print("\n步骤 1/5: 收集需要处理的note...")
         notes_to_process = note_manager.get_notes_list(start_datetime, end_datetime)
         total_notes = len(notes_to_process)
-        print(f"找到 {total_notes} 个帖子需要处理")
+        print(f"找到 {total_notes} 个note需要处理")
 
-        # 批量获取置顶帖子
+        # 批量获取置顶note
         pinned_notes = note_manager.get_pinned_notes(notes_to_process)
-        print(f"其中置顶帖子 {len(pinned_notes)} 个")
+        print(f"其中置顶note {len(pinned_notes)} 个")
 
-        # 使用集合操作来过滤非置顶帖子
+        # 使用集合操作来过滤非置顶note
         notes_to_process = list(set(notes_to_process) - pinned_notes)
 
-        print("\n步骤 2/5: 分析帖子关联...")
+        print("\n步骤 2/5: 分析note关联...")
         batch_size = 200
         processed_count = 0
         deleted_notes = 0
 
-        with tqdm(total=len(notes_to_process), desc="分析帖子") as pbar:
+        with tqdm(total=len(notes_to_process), desc="分析note") as pbar:
             while notes_to_process:
                 current_batch = notes_to_process[:batch_size]
                 notes_to_process = notes_to_process[batch_size:]
@@ -73,11 +73,11 @@ def clean_data(db_info, redis_info, start_date, end_date):
                     '待删除': deleted_notes
                 })
 
-        print("\n步骤 3/5: 删除帖子...")
+        print("\n步骤 3/5: 删除note...")
         notes_to_delete = redis_conn.execute(
             lambda: redis_conn.client.smembers('notes_to_delete')
         )
-        with tqdm(total=len(notes_to_delete), desc="删除帖子") as pbar:
+        with tqdm(total=len(notes_to_delete), desc="删除note") as pbar:
             for notes_batch in [list(notes_to_delete)[i:i+batch_size]
                               for i in range(0, len(notes_to_delete), batch_size)]:
                 note_manager.delete_notes_batch(notes_batch)
@@ -113,9 +113,9 @@ def clean_data(db_info, redis_info, start_date, end_date):
         summary = f"""
 清理完成！
 总计：
-- 处理帖子：{processed_count} 个
-- 删除帖子：{len(notes_to_delete)} 个
+- 处理note：{processed_count} 个
+- 删除note：{len(notes_to_delete)} 个
 - 删除文件：{len(files_to_delete) + len(remaining_files)} 个
 """
         print(summary)
-        return f'共清退{len(notes_to_delete)}帖子 {len(files_to_delete) + len(remaining_files)}文件'
+        return f'共清退{len(notes_to_delete)}个note {len(files_to_delete) + len(remaining_files)}个文件'

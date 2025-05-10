@@ -8,7 +8,7 @@ from multiprocessing import cpu_count
 
 class NoteManager:
     """
-    笔记管理类
+    Note管理类
     """
 
     def __init__(self, db_connection):
@@ -17,7 +17,7 @@ class NoteManager:
 
     def get_notes_list(self, start_date, end_date):
         """
-        获取在一段时间内所有的笔记id列表
+        获取在一段时间内所有的note id列表
         """
         start_id = generate_id(int(start_date.timestamp() * 1000))
         end_id = generate_id(int(end_date.timestamp() * 1000))
@@ -28,11 +28,11 @@ class NoteManager:
 
     def get_pinned_notes(self, note_ids):
         """
-        批量获取置顶帖子列表
+        批量获取置顶note列表
         Args:
-            note_ids (list): 帖子ID列表
+            note_ids (list): note ID列表
         Returns:
-            set: 置顶帖子ID集合
+            set: 置顶note ID集合
         """
         if not note_ids:
             return set()
@@ -50,11 +50,11 @@ class NoteManager:
 
     def get_notes_batch(self, note_ids):
         """
-        批量获取帖子信息
+        批量获取note信息
         Args:
-            note_ids: 帖子ID列表
+            note_ids: note ID列表
         Returns:
-            dict: 帖子信息字典，如果查询失败则返回空字典
+            dict: note信息字典，如果查询失败则返回空字典
         """
         if not note_ids:
             return {}
@@ -63,10 +63,10 @@ class NoteManager:
             # 检查连接状态
             if self.db_cursor.closed:
                 self.db_cursor = self.db_conn.cursor()
-            
+
             # 确保 note_ids 是列表类型
             note_ids = list(note_ids)
-            
+
             # 使用CTE优化查询
             self.db_cursor.execute(
                 """
@@ -130,9 +130,9 @@ class NoteManager:
 
     def analyze_notes_batch(self, note_ids, end_id, redis_conn: RedisConnection, file_manager, batch_size=100):
         """
-        批量分析帖子
+        批量分析note
         """
-        # 获取所有相关帖子信息
+        # 获取所有相关note信息
         all_related_notes = {}
         to_process = set(note_ids)
         processed = set()
@@ -145,7 +145,7 @@ class NoteManager:
                 all_related_notes[note_id] = info
                 processed.add(note_id)
 
-                # 添加关联帖子到处理队列
+                # 添加关联note到处理队列
                 if info["renoteId"] and info["renoteId"] not in processed:
                     to_process.add(info["renoteId"])
                 if info["replyId"] and info["replyId"] not in processed:
@@ -212,7 +212,7 @@ class NoteManager:
                 pipeline.hset('user_cache', user_id, str(is_important))
             pipeline.execute()
 
-        # 根据用户状态过滤需要保留的帖子
+        # 根据用户状态过滤需要保留的note
         for note_id in list(notes_to_delete):
             note_info = all_related_notes[note_id]
             if user_results.get(note_info["userId"]) == 'True':
@@ -247,14 +247,40 @@ class NoteManager:
 
     def delete_notes_batch(self, note_ids: list[str], batch_size: int = 1000) -> None:
         """
-        批量删除帖子，采用分批处理方式
+        批量删除note及其相关历史记录，采用分批处理方式
         Args:
-            note_ids: 要删除的帖子ID列表
+            note_ids: 要删除的noteID列表
         """
         if not note_ids:
             return
 
-        # 使用 WITH 和 JOIN 来优化删除操作
+        # 先检查note_history表是否存在
+        self.db_cursor.execute(
+            """
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public'
+                AND table_name = 'note_history'
+            )
+            """
+        )
+        note_history_exists = self.db_cursor.fetchone()[0]
+
+        # 如果note_history表存在，先删除note_history表中的关联记录
+        if note_history_exists:
+            self.db_cursor.execute(
+                """
+                WITH batch_ids AS (
+                    SELECT unnest(%s::text[]) AS id
+                )
+                DELETE FROM note_history nh
+                USING batch_ids b
+                WHERE nh."targetId" = b.id
+                """,
+                [note_ids]
+            )
+
+        # 再删除note表中的记录
         self.db_cursor.execute(
             """
             WITH batch_ids AS (
@@ -274,9 +300,9 @@ class NoteManager:
                                    batch_size: int = 100,
                                    max_workers: Optional[int] = None) -> int:
         """
-        并行批量分析帖子
+        并行批量分析note
         Args:
-            note_ids: 要处理的帖子ID列表
+            note_ids: 要处理的note ID列表
             end_id: 结束ID
             redis_conn: Redis连接
             file_manager: 文件管理器
@@ -295,7 +321,7 @@ class NoteManager:
         self.all_user_ids: Set[str] = set()
 
         def process_batch(batch_ids: List[str]) -> int:
-            # 获取帖子信息和关联帖子
+            # 获取note信息和关联note
             local_related_notes = {}
             to_process = set(batch_ids)
             processed = set()
@@ -308,7 +334,7 @@ class NoteManager:
                     local_related_notes[note_id] = info
                     processed.add(note_id)
 
-                    # 安全地检查和添加关联笔记
+                    # 安全地检查和添加关联note
                     if info.get("renoteId") and info["renoteId"] not in processed:
                         to_process.add(info["renoteId"])
                     if info.get("replyId") and info["replyId"] not in processed:
@@ -397,7 +423,7 @@ class NoteManager:
                 pipeline.hset('user_cache', user_id, str(is_important))
             pipeline.execute()
 
-        # 根据用户状态过滤需要保留的帖子
+        # 根据用户状态过滤需要保留的note
         for note_id in list(self.notes_to_delete):
             note_info = self.all_related_notes[note_id]
             if user_results.get(note_info["userId"]) == 'True':

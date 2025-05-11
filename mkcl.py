@@ -9,6 +9,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-c', '--config', metavar='PATH', help='Path to misskey configuration file', action='store', default='.config/default.yml')
 parser.add_argument('-d', '--days', metavar='DAYS', help='The days between now and the date when clear script stop cleaning', action='store', default=28, type=int)
 parser.add_argument('-s', '--start_date', metavar='DATE', help='The start date for cleaning', action='store', default='2021-01-01')
+parser.add_argument('-e', '--end_date', metavar='DATE', help='The end date for cleaning', action='store')
 parser.add_argument('-w', '--weeks', metavar='WEEKS', help='Week Mode', action='store', type=int)
 parser.add_argument('-m', '--months', metavar='MONTHS', help='30 days Mode', action='store', type=int)
 parser.add_argument('-n', '--no_post', help='No Post Mode', action='store_true')
@@ -18,7 +19,10 @@ parser.add_argument('-sfile','--single_file', help='Clean Single File Only', act
 
 args = parser.parse_args()
 
-if args.weeks is not None:
+if args.end_date is not None:
+    end_date_str = args.end_date
+    start_date_str = args.start_date
+elif args.weeks is not None:
     end_date = time.localtime(time.time() - 60*60*24*7*args.weeks)
     end_date_str = str(time.strftime('%Y-%m-%d', end_date))
     start_date = time.localtime(time.time() - 60*60*24*7*(args.weeks+1))

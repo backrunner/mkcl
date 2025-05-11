@@ -70,7 +70,7 @@ def clean_data(db_info, redis_info, start_date, end_date):
                 pbar.update(len(current_batch))
                 pbar.set_postfix({
                     '已处理': processed_count,
-                    '待删除': deleted_notes
+                    '待分析': deleted_notes
                 })
 
         print("\n步骤 3/5: 删除note...")

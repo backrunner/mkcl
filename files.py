@@ -69,14 +69,24 @@ class FileManager:
         print(f"扫描文件范围: {start_id}-{end_id}")
 
         # 首先获取总数
-        self.db_cursor.execute(
-            '''SELECT COUNT(*) FROM drive_file
-            WHERE id BETWEEN %s::text AND %s::text
-            AND "isLink" IS TRUE
-            AND "userHost" IS NOT NULL''',
-            [start_id, end_id]
-        )
-        total_count = self.db_cursor.fetchone()[0]
+        try:
+            self.db_cursor.execute(
+                '''SELECT COUNT(*) FROM drive_file
+                WHERE id BETWEEN %s::text AND %s::text
+                AND "isLink" IS TRUE
+                AND "userHost" IS NOT NULL''',
+                [start_id, end_id]
+            )
+            total_count = self.db_cursor.fetchone()[0]
+        except Exception as e:
+            print(f"获取文件总数失败: {str(e)}")
+            # 回滚事务并重新连接
+            try:
+                self.db_conn.rollback()
+                self.db_cursor = self.db_conn.cursor()
+            except Exception:
+                pass
+            return
 
         processed = 0
         deleted = 0
@@ -122,24 +132,48 @@ class FileManager:
                     if uncached_file_ids:
                         # 批量获取文件引用
                         retry_count = 0
+                        file_refs = {}
+                        avatar_banner_files = set()
+                        
                         while retry_count < max_retries:
                             try:
-                                file_refs = self.get_file_references_batch(uncached_file_ids)
-                                # 批量检查头像和横幅使用
-                                avatar_banner_files = self.check_user_avatar_banner_batch(uncached_file_ids)
+                                # 确保每次重试前回滚任何失败的事务
+                                self.db_conn.rollback()
+                                
+                                # 依次处理每个查询，确保在错误时可以继续流程
+                                try:
+                                    file_refs = self.get_file_references_batch(uncached_file_ids)
+                                except Exception as e:
+                                    print(f"批量获取文件引用数失败: {str(e)}")
+                                    self.db_conn.rollback()
+                                    # 但不中断循环，继续尝试其他查询
+                                
+                                try:
+                                    # 批量检查头像和横幅使用
+                                    avatar_banner_files = self.check_user_avatar_banner_batch(uncached_file_ids)
+                                except Exception as e:
+                                    print(f"批量检查用户头像和横幅失败: {str(e)}")
+                                    self.db_conn.rollback()
+                                
+                                # 如果至少有一个查询成功，继续处理
                                 break
                             except Exception as e:
                                 retry_count += 1
                                 if retry_count >= max_retries:
                                     print(f"获取文件信息失败，已达最大重试次数: {str(e)}")
                                     # 继续处理下一批
-                                    file_refs = {}
-                                    avatar_banner_files = set()
                                 else:
                                     print(f"获取文件信息失败，重试 {retry_count}/{max_retries}: {str(e)}")
                                     # 等待短暂时间后重试
                                     import time
                                     time.sleep(0.5)
+                                
+                                # 回滚任何失败的事务并重新创建游标
+                                try:
+                                    self.db_conn.rollback()
+                                    self.db_cursor = self.db_conn.cursor()
+                                except Exception:
+                                    pass
 
                         # 找出单独文件
                         for file_id in uncached_file_ids:
@@ -164,6 +198,8 @@ class FileManager:
                     print(f"处理文件批次失败，跳过当前批次: {str(e)}")
                     # 移动到下一批，避免卡在同一位置
                     try:
+                        # 回滚事务
+                        self.db_conn.rollback()
                         # 尝试重新初始化连接
                         self.db_cursor = self.db_conn.cursor()
                         # 增加last_id，避免无限循环
@@ -187,14 +223,14 @@ class FileManager:
             # 确保 file_ids 是列表类型
             file_ids = list(file_ids)
 
-            # 修复：显式转换为数组类型
+            # 修复：使用明确的类型转换并改进查询
             self.db_cursor.execute(
                 """
                 WITH file_refs AS (
-                    SELECT unnest(n."fileIds") as file_id, count(*) as ref_count
+                    SELECT unnest(n."fileIds"::text[]) as file_id, count(*) as ref_count
                     FROM note n
-                    WHERE n."fileIds" && %s::text[]
-                    GROUP BY unnest(n."fileIds")
+                    WHERE n."fileIds"::text[] && %s::text[]
+                    GROUP BY unnest(n."fileIds"::text[])
                 )
                 SELECT f.id, COALESCE(fr.ref_count, 0) as ref_count
                 FROM unnest(%s::text[]) as f(id)
@@ -216,12 +252,13 @@ class FileManager:
 
         except Exception as e:
             print(f"批量获取文件引用数失败: {str(e)}")
-            # 尝试重新初始化连接
+            # 回滚事务并重新初始化连接
             try:
+                self.db_conn.rollback()
                 self.db_cursor = self.db_conn.cursor()
             except Exception as conn_error:
                 print(f"重新初始化连接失败: {str(conn_error)}")
-            return {}
+            raise  # 重新抛出异常，让上层处理
 
     def get_files_info_batch(self, file_ids):
         """
@@ -262,12 +299,13 @@ class FileManager:
 
         except Exception as e:
             print(f"批量获取文件信息失败: {str(e)}")
-            # 尝试重新初始化连接
+            # 回滚事务并重新初始化连接
             try:
+                self.db_conn.rollback()
                 self.db_cursor = self.db_conn.cursor()
             except Exception as conn_error:
                 print(f"重新初始化连接失败: {str(conn_error)}")
-            return {}
+            raise  # 重新抛出异常，让上层处理
 
     def check_user_avatar_banner_batch(self, file_ids):
         """
@@ -308,12 +346,13 @@ class FileManager:
 
         except Exception as e:
             print(f"批量检查用户头像和横幅失败: {str(e)}")
-            # 尝试重新初始化连接
+            # 回滚事务并重新初始化连接
             try:
+                self.db_conn.rollback()
                 self.db_cursor = self.db_conn.cursor()
             except Exception as conn_error:
                 print(f"重新初始化连接失败: {str(conn_error)}")
-            return set()
+            raise  # 重新抛出异常，让上层处理
 
     def delete_files_batch(self, file_ids: list[str], batch_size: int = 1000) -> None:
         """

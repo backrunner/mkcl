@@ -58,7 +58,7 @@ def clean_data(db_info, redis_info, start_date, end_date):
                 current_batch = notes_to_process[:batch_size]
                 notes_to_process = notes_to_process[batch_size:]
 
-                batch_deleted = note_manager.analyze_notes_batch_parallel(
+                batch_to_delete = note_manager.analyze_notes_batch_parallel(
                     current_batch,
                     end_id,
                     redis_conn,
@@ -66,7 +66,7 @@ def clean_data(db_info, redis_info, start_date, end_date):
                 )
 
                 processed_count += len(current_batch)
-                deleted_notes += batch_deleted
+                deleted_notes += batch_to_delete
                 pbar.update(len(current_batch))
                 pbar.set_postfix({
                     '已处理': processed_count,

@@ -69,6 +69,18 @@ WHERE "isLink" IS TRUE AND "userHost" IS NOT NULL;
 CREATE INDEX IF NOT EXISTS "idx_note_userid_composite" ON note ("userId", "userHost", "hasPoll")
 WHERE "hasPoll" = true OR "userHost" IS NULL;
 
+-- GIN索引
+CREATE INDEX IF NOT EXISTS "idx_note_non_empty_fileids" ON note USING gin ("fileIds")
+     WHERE array_length("fileIds", 1) > 0;
+
+-- 文件计数索引
+CREATE INDEX IF NOT EXISTS "idx_note_has_files" ON note ((array_length("fileIds", 1) > 0)) 
+     WHERE array_length("fileIds", 1) > 0
+
+-- 联合索引
+CREATE INDEX IF NOT EXISTS "idx_user_is_local" ON public.user (id) 
+     WHERE host IS NULL;
+
 -- 可用参数
 
 **注意**：该操作为不可逆操作，操作不当可能会使数据丢失，请慎重。

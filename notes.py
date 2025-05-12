@@ -5,7 +5,6 @@ from typing import List, Dict, Set, Any, Optional
 import threading
 from multiprocessing import cpu_count
 
-
 class NoteManager:
     """
     Note管理类

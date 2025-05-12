@@ -44,11 +44,12 @@ CREATE INDEX IF NOT EXISTS "idx_note_renote_reply" ON note ("renoteId", "replyId
 CREATE INDEX IF NOT EXISTS "idx_note_fileids" ON note USING gin ("fileIds");
 
 -- 相关表的索引
-CREATE INDEX IF NOT EXISTS "idx_note_reaction_noteid" ON note_reaction ("noteId");
-CREATE INDEX IF NOT EXISTS "idx_note_favorite_noteid" ON note_favorite ("noteId");
-CREATE INDEX IF NOT EXISTS "idx_clip_note_noteid" ON clip_note ("noteId");
-CREATE INDEX IF NOT EXISTS "idx_note_unread_noteid" ON note_unread ("noteId");
-CREATE INDEX IF NOT EXISTS "idx_note_watching_noteid" ON note_watching ("noteId");
+CREATE INDEX IF NOT EXISTS "idx_note_reaction_noteid" ON note_reaction("noteId");
+CREATE INDEX IF NOT EXISTS "idx_note_favorite_noteid" ON note_favorite("noteId");
+CREATE INDEX IF NOT EXISTS "idx_clip_note_noteid" ON clip_note("noteId");
+CREATE INDEX IF NOT EXISTS "idx_note_unread_noteid" ON note_unread("noteId");
+CREATE INDEX IF NOT EXISTS "idx_note_watching_noteid" ON note_watching("noteId");
+CREATE INDEX IF NOT EXISTS "idx_user_note_pining_noteid" ON user_note_pining("noteId");
 
 -- 时间范围查询优化
 CREATE INDEX IF NOT EXISTS "idx_note_id_range" ON note (id DESC);
@@ -80,6 +81,9 @@ CREATE INDEX IF NOT EXISTS "idx_note_has_files" ON note ((array_length("fileIds"
 -- 联合索引
 CREATE INDEX IF NOT EXISTS "idx_user_is_local" ON public.user (id) 
      WHERE host IS NULL;
+
+-- 历史记录索引
+CREATE INDEX IF NOT EXISTS "idx_note_history_targetid" ON note_history("targetId");
 
 -- 可用参数
 

@@ -57,8 +57,11 @@ class NoteManager:
         start_id = generate_id(int(start_date.timestamp() * 1000))
         end_id = generate_id(int(end_date.timestamp() * 1000))
 
-        # 使用预编译语句，确保参数是str类型
-        self.db_cursor.execute("EXECUTE get_notes_by_id_range (%s::text, %s::text)", [end_id, start_id])
+        # 不使用预编译语句，直接使用参数化查询
+        self.db_cursor.execute(
+            """SELECT id FROM note WHERE "id" < %s AND "id" > %s""",
+            [end_id, start_id]
+        )
         results = self.db_cursor.fetchall()
         return [result["id"] for result in results]
 

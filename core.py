@@ -27,8 +27,11 @@ def clean_data(db_info, redis_info, start_date, end_date):
         'note_list'
     ]
 
+    # 使用管道批量删除缓存键
+    pipeline = redis_conn.pipeline()
     for key in cache_keys:
-        redis_conn.execute(lambda: redis_conn.client.delete(key))
+        pipeline.delete(key)
+    redis_conn.execute(lambda: pipeline.execute())
 
     try:
         with db.get_connection() as db_conn:
@@ -77,6 +80,7 @@ def clean_data(db_info, redis_info, start_date, end_date):
                     })
 
             print("\n步骤 3/5: 删除note...")
+            # 批量获取待删除的notes
             notes_to_delete = redis_conn.execute(
                 lambda: redis_conn.client.smembers('notes_to_delete')
             )
@@ -93,8 +97,10 @@ def clean_data(db_info, redis_info, start_date, end_date):
                     raise  # 重新抛出异常，让主线程能够捕获
                 
             with tqdm(total=len(notes_to_delete), desc="删除note") as pbar:
-                note_batches = [list(notes_to_delete)[i:i+batch_size] 
-                               for i in range(0, len(notes_to_delete), batch_size)]
+                # 优化批处理大小，可根据实际情况调整
+                optimized_batch_size = min(batch_size * 2, 500)  # 增大删除操作的批处理大小
+                note_batches = [list(notes_to_delete)[i:i+optimized_batch_size] 
+                               for i in range(0, len(notes_to_delete), optimized_batch_size)]
                 
                 try:
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -116,6 +122,7 @@ def clean_data(db_info, redis_info, start_date, end_date):
                     return f"清理失败: {str(e)}"
 
             print("\n步骤 4/5: 删除关联文件...")
+            # 批量获取待删除的文件
             files_to_delete = redis_conn.execute(
                 lambda: redis_conn.client.smembers('files_to_delete')
             )
@@ -130,8 +137,10 @@ def clean_data(db_info, redis_info, start_date, end_date):
                     raise  # 重新抛出异常，让主线程能够捕获
                 
             with tqdm(total=len(files_to_delete), desc="删除文件") as pbar:
-                file_batches = [list(files_to_delete)[i:i+batch_size]
-                              for i in range(0, len(files_to_delete), batch_size)]
+                # 优化批处理大小
+                optimized_batch_size = min(batch_size * 2, 500)  # 增大删除操作的批处理大小
+                file_batches = [list(files_to_delete)[i:i+optimized_batch_size]
+                              for i in range(0, len(files_to_delete), optimized_batch_size)]
                 
                 try:
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -155,14 +164,17 @@ def clean_data(db_info, redis_info, start_date, end_date):
             print("\n步骤 5/5: 清理单独文件...")
             file_manager.get_single_files(start_datetime, end_datetime, redis_conn)
 
+            # 批量获取待删除的单独文件
             remaining_files = redis_conn.execute(
                 lambda: redis_conn.client.smembers('files_to_delete')
             )
             
             # 使用多线程并行删除单独文件
             with tqdm(total=len(remaining_files), desc="删除单独文件") as pbar:
-                remaining_batches = [list(remaining_files)[i:i+batch_size]
-                                   for i in range(0, len(remaining_files), batch_size)]
+                # 优化批处理大小
+                optimized_batch_size = min(batch_size * 2, 500)  # 增大删除操作的批处理大小
+                remaining_batches = [list(remaining_files)[i:i+optimized_batch_size]
+                                   for i in range(0, len(remaining_files), optimized_batch_size)]
                 
                 try:
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -183,9 +195,11 @@ def clean_data(db_info, redis_info, start_date, end_date):
                     print(f"删除单独文件过程失败，终止整个清理流程: {str(e)}")
                     return f"清理失败: {str(e)}"
 
-            # 清理缓存
-            redis_conn.execute(lambda: redis_conn.client.delete("files_to_keep"))
-            redis_conn.execute(lambda: redis_conn.client.delete("user_cache"))
+            # 清理缓存 - 使用管道批量操作
+            pipeline = redis_conn.pipeline()
+            pipeline.delete("files_to_keep")
+            pipeline.delete("user_cache")
+            redis_conn.execute(lambda: pipeline.execute())
 
             # 生成总结
             summary = f"""

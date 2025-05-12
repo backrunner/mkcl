@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Set, Any, Optional
 import threading
 from multiprocessing import cpu_count
+from psycopg2.extras import execute_values
 
 class NoteManager:
     """
@@ -13,6 +14,39 @@ class NoteManager:
     def __init__(self, db_connection):
         self.db_cursor = db_connection.cursor()
         self.db_conn = db_connection
+        # 预编译常用SQL语句
+        self._prepare_statements()
+
+    def _prepare_statements(self):
+        """预编译常用SQL语句"""
+        # 为常用查询准备语句名称，提高执行效率
+        self.db_cursor.execute(
+            """PREPARE get_user_info AS 
+               SELECT id, host, "followersCount", "followingCount"
+               FROM public.user
+               WHERE id = ANY($1)"""
+        )
+        
+        self.db_cursor.execute(
+            """PREPARE get_notes_by_id_range AS 
+               SELECT id FROM note WHERE "id" < $1 AND "id" > $2"""
+        )
+        
+        self.db_cursor.execute(
+            """PREPARE get_pinned_notes AS 
+               SELECT "noteId" FROM user_note_pining WHERE "noteId" = ANY($1)"""
+        )
+        
+        self.db_cursor.execute(
+            """PREPARE delete_note_history AS 
+               DELETE FROM note_history nh
+               WHERE nh."targetId" = ANY($1)"""
+        )
+        
+        self.db_cursor.execute(
+            """PREPARE delete_notes AS 
+               DELETE FROM note WHERE id = ANY($1)"""
+        )
 
     def get_notes_list(self, start_date, end_date):
         """
@@ -20,8 +54,9 @@ class NoteManager:
         """
         start_id = generate_id(int(start_date.timestamp() * 1000))
         end_id = generate_id(int(end_date.timestamp() * 1000))
-        self.db_cursor.execute(
-            """SELECT id FROM note WHERE "id" < %s AND "id" > %s;""", [end_id, start_id])
+        
+        # 使用预编译语句
+        self.db_cursor.execute("EXECUTE get_notes_by_id_range (%s, %s)", [end_id, start_id])
         results = self.db_cursor.fetchall()
         return [result[0] for result in results]
 
@@ -36,14 +71,8 @@ class NoteManager:
         if not note_ids:
             return set()
 
-        # PostgreSQL中使用 = ANY 语法替代 IN，这样可以正确处理参数化查询
-        query = """
-            SELECT "noteId"
-            FROM user_note_pining
-            WHERE "noteId" = ANY(%s)
-        """
-        # 将note_ids列表作为一个数组参数传递
-        self.db_cursor.execute(query, (note_ids,))
+        # 使用预编译语句
+        self.db_cursor.execute("EXECUTE get_pinned_notes (%s)", [note_ids])
         results = self.db_cursor.fetchall()
         return {str(result[0]) for result in results}
 
@@ -65,40 +94,90 @@ class NoteManager:
 
             # 确保 note_ids 是列表类型
             note_ids = list(note_ids)
-
-            # 使用CTE优化查询
-            self.db_cursor.execute(
-                """
-                WITH flag_status AS (
-                    SELECT DISTINCT "noteId", TRUE as is_flagged
-                    FROM (
-                        SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s)
-                        UNION ALL
-                        SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s)
-                        UNION ALL
-                        SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s)
-                        UNION ALL
-                        SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s)
-                        UNION ALL
-                        SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s)
-                    ) combined_flags
+            
+            # 当ID数量超过阈值时，使用临时表优化
+            if len(note_ids) > 100:
+                # 创建临时表
+                self.db_cursor.execute("CREATE TEMP TABLE temp_note_ids (id text) ON COMMIT DROP")
+                
+                # 批量插入ID到临时表
+                execute_values(
+                    self.db_cursor,
+                    "INSERT INTO temp_note_ids (id) VALUES %s",
+                    [(id,) for id in note_ids]
                 )
-                SELECT
-                    n.id,
-                    n."userId",
-                    n."userHost",
-                    n.mentions,
-                    n."renoteId",
-                    n."replyId",
-                    n."fileIds",
-                    n."hasPoll",
-                    COALESCE(f.is_flagged, FALSE) as "isFlagged"
-                FROM note n
-                LEFT JOIN flag_status f ON n.id = f."noteId"
-                WHERE n.id = ANY(%s)
-                """,
-                [note_ids, note_ids, note_ids, note_ids, note_ids, note_ids]
-            )
+                
+                # 使用JOIN代替IN查询
+                self.db_cursor.execute(
+                    """
+                    WITH flag_status AS (
+                        SELECT DISTINCT "noteId", TRUE as is_flagged
+                        FROM (
+                            SELECT nr."noteId" FROM note_reaction nr 
+                            JOIN temp_note_ids t ON nr."noteId" = t.id
+                            UNION ALL
+                            SELECT nf."noteId" FROM note_favorite nf 
+                            JOIN temp_note_ids t ON nf."noteId" = t.id
+                            UNION ALL
+                            SELECT cn."noteId" FROM clip_note cn 
+                            JOIN temp_note_ids t ON cn."noteId" = t.id
+                            UNION ALL
+                            SELECT nu."noteId" FROM note_unread nu 
+                            JOIN temp_note_ids t ON nu."noteId" = t.id
+                            UNION ALL
+                            SELECT nw."noteId" FROM note_watching nw 
+                            JOIN temp_note_ids t ON nw."noteId" = t.id
+                        ) combined_flags
+                    )
+                    SELECT
+                        n.id,
+                        n."userId",
+                        n."userHost",
+                        n.mentions,
+                        n."renoteId",
+                        n."replyId",
+                        n."fileIds",
+                        n."hasPoll",
+                        COALESCE(f.is_flagged, FALSE) as "isFlagged"
+                    FROM note n
+                    JOIN temp_note_ids t ON n.id = t.id
+                    LEFT JOIN flag_status f ON n.id = f."noteId"
+                    """
+                )
+            else:
+                # 对于少量ID，使用原来的IN查询
+                self.db_cursor.execute(
+                    """
+                    WITH flag_status AS (
+                        SELECT DISTINCT "noteId", TRUE as is_flagged
+                        FROM (
+                            SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s)
+                            UNION ALL
+                            SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s)
+                            UNION ALL
+                            SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s)
+                            UNION ALL
+                            SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s)
+                            UNION ALL
+                            SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s)
+                        ) combined_flags
+                    )
+                    SELECT
+                        n.id,
+                        n."userId",
+                        n."userHost",
+                        n.mentions,
+                        n."renoteId",
+                        n."replyId",
+                        n."fileIds",
+                        n."hasPoll",
+                        COALESCE(f.is_flagged, FALSE) as "isFlagged"
+                    FROM note n
+                    LEFT JOIN flag_status f ON n.id = f."noteId"
+                    WHERE n.id = ANY(%s)
+                    """,
+                    [note_ids, note_ids, note_ids, note_ids, note_ids, note_ids]
+                )
 
             # 检查查询是否成功执行
             if self.db_cursor.description is None:
@@ -176,6 +255,7 @@ class NoteManager:
             pipeline.hget('user_cache', user_id)
 
         try:
+            # 执行Redis管道命令
             user_results = dict(zip(all_user_ids, redis_conn.execute(
                 lambda: pipeline.execute()
             )))
@@ -195,21 +275,15 @@ class NoteManager:
         }
 
         if uncached_users:
-            self.db_cursor.execute(
-                """
-                SELECT id, host, "followersCount", "followingCount"
-                FROM public.user
-                WHERE id = ANY(%s)
-                """,
-                [list(uncached_users)]
-            )
+            # 使用预编译语句
+            self.db_cursor.execute("EXECUTE get_user_info (%s)", [list(uncached_users)])
 
             pipeline = redis_conn.pipeline()
             for user_id, host, followers, following in self.db_cursor.fetchall():
                 is_important = (host is None) or (followers + following > 0)
                 user_results[user_id] = str(is_important)
                 pipeline.hset('user_cache', user_id, str(is_important))
-            pipeline.execute()
+            redis_conn.execute(lambda: pipeline.execute())
 
         # 根据用户状态过滤需要保留的note
         for note_id in list(notes_to_delete):
@@ -224,22 +298,32 @@ class NoteManager:
             used_as_avatar_banner = file_manager.check_user_avatar_banner_batch(list(files_to_process))
 
             pipeline = redis_conn.pipeline()
+            # 批量操作文件处理结果
+            files_to_keep = []
+            files_to_delete = []
+            
             for file_id in files_to_process:
                 if (file_id in used_as_avatar_banner or
                     file_refs.get(file_id, 0) > 1 or
                     not files_info.get(file_id, {}).get("isLink", False)):
-                    pipeline.sadd('files_to_keep', file_id)
+                    files_to_keep.append(file_id)
                 else:
-                    pipeline.sadd('files_to_delete', file_id)
+                    files_to_delete.append(file_id)
+            
+            # 批量添加到Redis集合
+            if files_to_keep:
+                pipeline.sadd('files_to_keep', *files_to_keep)
+            if files_to_delete:
+                pipeline.sadd('files_to_delete', *files_to_delete)
 
             redis_conn.execute(lambda: pipeline.execute())
 
-        # 更新Redis
+        # 更新Redis - 使用批量操作
         pipeline = redis_conn.pipeline()
-        for note_id in notes_to_delete:
-            pipeline.sadd('notes_to_delete', note_id)
-        for note_id in note_ids:
-            pipeline.srem('note_list', note_id)
+        if notes_to_delete:
+            pipeline.sadd('notes_to_delete', *notes_to_delete)
+        if note_ids:
+            pipeline.srem('note_list', *note_ids)
         redis_conn.execute(lambda: pipeline.execute())
 
         return len(notes_to_delete)
@@ -267,30 +351,11 @@ class NoteManager:
 
         # 如果note_history表存在，先删除note_history表中的关联记录
         if note_history_exists:
-            self.db_cursor.execute(
-                """
-                WITH batch_ids AS (
-                    SELECT unnest(%s::text[]) AS id
-                )
-                DELETE FROM note_history nh
-                USING batch_ids b
-                WHERE nh."targetId" = b.id
-                """,
-                [note_ids]
-            )
+            # 使用预编译语句批量删除
+            self.db_cursor.execute("EXECUTE delete_note_history (%s)", [note_ids])
 
         # 再删除note表中的记录
-        self.db_cursor.execute(
-            """
-            WITH batch_ids AS (
-                SELECT unnest(%s::text[]) AS id
-            )
-            DELETE FROM note n
-            USING batch_ids b
-            WHERE n.id = b.id
-            """,
-            [note_ids]
-        )
+        self.db_cursor.execute("EXECUTE delete_notes (%s)", [note_ids])
 
         self.db_conn.commit()
 
@@ -306,11 +371,11 @@ class NoteManager:
             redis_conn: Redis连接
             file_manager: 文件管理器
             batch_size: 批处理大小
-            max_workers: 最大工作线程数，默认为 (CPU核心数 * 2)
+            max_workers: 最大工作线程数，默认为 (CPU核心数)
         """
-        # 如果未指定worker数量，则使用 CPU核心数 * 2
+        # 如果未指定worker数量，则使用 CPU核心数
         if max_workers is None:
-            max_workers = cpu_count() * 2
+            max_workers = cpu_count()
 
         # 线程安全的数据结构
         self.lock = threading.Lock()
@@ -382,22 +447,21 @@ class NoteManager:
             for future in as_completed(future_to_batch):
                 total_deleted += future.result()
 
-        # 处理用户状态
+        # 批量获取用户状态
         pipeline = redis_conn.pipeline()
         for user_id in self.all_user_ids:
             pipeline.hget('user_cache', user_id)
 
         try:
-            user_results = dict(zip(self.all_user_ids, redis_conn.execute(
-                lambda: pipeline.execute()
-            )))
+            # 批量执行Redis命令
+            user_result_list = redis_conn.execute(lambda: pipeline.execute())
+            user_results = dict(zip(self.all_user_ids, user_result_list))
         except (ConnectionError, TimeoutError):
             pipeline = redis_conn.pipeline()
             for user_id in self.all_user_ids:
                 pipeline.hget('user_cache', user_id)
-            user_results = dict(zip(self.all_user_ids, redis_conn.execute(
-                lambda: pipeline.execute()
-            )))
+            user_result_list = redis_conn.execute(lambda: pipeline.execute())
+            user_results = dict(zip(self.all_user_ids, user_result_list))
 
         # 处理未缓存的用户
         uncached_users = {
@@ -406,27 +470,33 @@ class NoteManager:
         }
 
         if uncached_users:
-            self.db_cursor.execute(
-                """
-                SELECT id, host, "followersCount", "followingCount"
-                FROM public.user
-                WHERE id = ANY(%s)
-                """,
-                [list(uncached_users)]
-            )
+            # 使用预编译语句
+            self.db_cursor.execute("EXECUTE get_user_info (%s)", [list(uncached_users)])
 
+            # 批量更新Redis用户缓存
             pipeline = redis_conn.pipeline()
+            user_cache_updates = {}
+            
             for user_id, host, followers, following in self.db_cursor.fetchall():
                 is_important = (host is None) or (followers + following > 0)
                 user_results[user_id] = str(is_important)
-                pipeline.hset('user_cache', user_id, str(is_important))
-            pipeline.execute()
+                user_cache_updates[user_id] = str(is_important)
+            
+            # 如果有数据，批量更新
+            if user_cache_updates:
+                pipeline.hmset('user_cache', user_cache_updates)
+                redis_conn.execute(lambda: pipeline.execute())
 
         # 根据用户状态过滤需要保留的note
-        for note_id in list(self.notes_to_delete):
+        notes_to_keep = set()
+        for note_id in self.notes_to_delete:
             note_info = self.all_related_notes[note_id]
             if user_results.get(note_info["userId"]) == 'True':
-                self.notes_to_delete.remove(note_id)
+                notes_to_keep.add(note_id)
+        
+        # 批量移除需要保留的note
+        if notes_to_keep:
+            self.notes_to_delete -= notes_to_keep
 
         # 处理文件
         if self.files_to_process:
@@ -437,23 +507,34 @@ class NoteManager:
             used_as_avatar_banner = file_manager.check_user_avatar_banner_batch(
                 list(self.files_to_process))
 
-            pipeline = redis_conn.pipeline()
+            # 批量处理文件分类
+            files_to_keep = []
+            files_to_delete = []
+            
             for file_id in self.files_to_process:
                 if (file_id in used_as_avatar_banner or
                     file_refs.get(file_id, 0) > 1 or
                     not files_info.get(file_id, {}).get("isLink", False)):
-                    pipeline.sadd('files_to_keep', file_id)
+                    files_to_keep.append(file_id)
                 else:
-                    pipeline.sadd('files_to_delete', file_id)
-
+                    files_to_delete.append(file_id)
+            
+            # 批量更新Redis
+            pipeline = redis_conn.pipeline()
+            if files_to_keep:
+                pipeline.sadd('files_to_keep', *files_to_keep)
+            if files_to_delete:
+                pipeline.sadd('files_to_delete', *files_to_delete)
             redis_conn.execute(lambda: pipeline.execute())
 
-        # 更新Redis
+        # 更新Redis - 批量操作
         pipeline = redis_conn.pipeline()
-        for note_id in self.notes_to_delete:
-            pipeline.sadd('notes_to_delete', note_id)
-        for note_id in note_ids:
-            pipeline.srem('note_list', note_id)
+        # 批量添加到notes_to_delete集合
+        if self.notes_to_delete:
+            pipeline.sadd('notes_to_delete', *self.notes_to_delete)
+        # 批量从note_list集合移除
+        if note_ids:
+            pipeline.srem('note_list', *note_ids)
         redis_conn.execute(lambda: pipeline.execute())
 
         return len(self.notes_to_delete)

@@ -29,7 +29,7 @@ class FileManager:
             self.db_cursor.execute("""
                 SELECT COUNT(*)
                 FROM note
-                WHERE %s = ANY("fileIds");
+                WHERE %s::text = ANY("fileIds");
             """, [file_id])
 
             result = self.db_cursor.fetchone()
@@ -50,7 +50,7 @@ class FileManager:
             self.db_cursor.execute("""
                 SELECT "isLink"
                 FROM drive_file
-                WHERE id = %s;
+                WHERE id = %s::text;
             """, [file_id])
 
             result = self.db_cursor.fetchone()
@@ -71,7 +71,7 @@ class FileManager:
         # 首先获取总数
         self.db_cursor.execute(
             '''SELECT COUNT(*) FROM drive_file
-            WHERE id BETWEEN %s AND %s
+            WHERE id BETWEEN %s::text AND %s::text
             AND "isLink" IS TRUE
             AND "userHost" IS NOT NULL''',
             [start_id, end_id]
@@ -82,55 +82,97 @@ class FileManager:
         deleted = 0
         batch_size = 1000  # 增加批处理大小
         last_id = start_id
+        max_retries = 3  # 最大重试次数
 
         with tqdm(total=total_count, desc="扫描单独文件") as pbar:
             while processed < total_count:
-                self.db_cursor.execute(
-                    '''SELECT id
-                    FROM drive_file
-                    WHERE id >= %s
-                    AND id <= %s
-                    AND "isLink" IS TRUE
-                    AND "userHost" IS NOT NULL
-                    ORDER BY id
-                    LIMIT %s''',
-                    [last_id, end_id, batch_size]
-                )
-                results = self.db_cursor.fetchall()
-                if not results:
-                    break
+                try:
+                    self.db_cursor.execute(
+                        '''SELECT id
+                        FROM drive_file
+                        WHERE id >= %s::text
+                        AND id <= %s::text
+                        AND "isLink" IS TRUE
+                        AND "userHost" IS NOT NULL
+                        ORDER BY id
+                        LIMIT %s''',
+                        [last_id, end_id, batch_size]
+                    )
+                    results = self.db_cursor.fetchall()
+                    if not results:
+                        break
 
-                file_ids = [result[0] for result in results]
-                last_id = file_ids[-1]
+                    file_ids = [result[0] for result in results]
+                    last_id = file_ids[-1]
 
-                # 过滤掉已缓存的文件ID
-                uncached_file_ids = [
-                    fid for fid in file_ids
-                    if not redis_conn.execute(lambda: redis_conn.client.sismember('file_cache', fid))
-                ]
-
-                if uncached_file_ids:
-                    # 批量获取文件引用
-                    file_refs = self.get_file_references_batch(uncached_file_ids)
-                    # 批量检查头像和横幅使用
-                    avatar_banner_files = self.check_user_avatar_banner_batch(uncached_file_ids)
-
-                    # 找出单独文件
-                    for file_id in uncached_file_ids:
-                        if file_refs.get(file_id, 0) == 0 and file_id not in avatar_banner_files:
-                            redis_conn.execute(
-                                lambda: redis_conn.client.sadd('files_to_delete', file_id)
+                    # 过滤掉已缓存的文件ID
+                    uncached_file_ids = []
+                    for fid in file_ids:
+                        try:
+                            is_cached = redis_conn.execute(
+                                lambda: redis_conn.client.sismember('file_cache', fid)
                             )
-                            deleted += 1
+                            if not is_cached:
+                                uncached_file_ids.append(fid)
+                        except Exception as e:
+                            print(f"检查文件缓存状态失败 (file_id: {fid}): {str(e)}")
+                            # 保守处理，将未能确认的ID添加到处理列表
+                            uncached_file_ids.append(fid)
 
-                current_batch_size = len(file_ids)
-                processed += current_batch_size
+                    if uncached_file_ids:
+                        # 批量获取文件引用
+                        retry_count = 0
+                        while retry_count < max_retries:
+                            try:
+                                file_refs = self.get_file_references_batch(uncached_file_ids)
+                                # 批量检查头像和横幅使用
+                                avatar_banner_files = self.check_user_avatar_banner_batch(uncached_file_ids)
+                                break
+                            except Exception as e:
+                                retry_count += 1
+                                if retry_count >= max_retries:
+                                    print(f"获取文件信息失败，已达最大重试次数: {str(e)}")
+                                    # 继续处理下一批
+                                    file_refs = {}
+                                    avatar_banner_files = set()
+                                else:
+                                    print(f"获取文件信息失败，重试 {retry_count}/{max_retries}: {str(e)}")
+                                    # 等待短暂时间后重试
+                                    import time
+                                    time.sleep(0.5)
 
-                pbar.update(current_batch_size)
-                pbar.set_postfix({
-                    '已处理': processed,
-                    '待删除': deleted
-                })
+                        # 找出单独文件
+                        for file_id in uncached_file_ids:
+                            if file_refs.get(file_id, 0) == 0 and file_id not in avatar_banner_files:
+                                try:
+                                    redis_conn.execute(
+                                        lambda: redis_conn.client.sadd('files_to_delete', file_id)
+                                    )
+                                    deleted += 1
+                                except Exception as e:
+                                    print(f"添加文件到删除集合失败 (file_id: {file_id}): {str(e)}")
+
+                    current_batch_size = len(file_ids)
+                    processed += current_batch_size
+
+                    pbar.update(current_batch_size)
+                    pbar.set_postfix({
+                        '已处理': processed,
+                        '待删除': deleted
+                    })
+                except Exception as e:
+                    print(f"处理文件批次失败，跳过当前批次: {str(e)}")
+                    # 移动到下一批，避免卡在同一位置
+                    try:
+                        # 尝试重新初始化连接
+                        self.db_cursor = self.db_conn.cursor()
+                        # 增加last_id，避免无限循环
+                        last_id_increment = int(last_id, 16) + 1 if last_id else 0
+                        last_id = format(last_id_increment, 'x')
+                    except Exception as conn_error:
+                        print(f"重新初始化连接失败: {str(conn_error)}")
+                        # 如果连接恢复失败，退出循环
+                        break
 
         print(f"\n找到 {deleted} 个单独文件需要删除")
 
@@ -145,12 +187,13 @@ class FileManager:
             # 确保 file_ids 是列表类型
             file_ids = list(file_ids)
 
+            # 修复：显式转换为数组类型
             self.db_cursor.execute(
                 """
                 WITH file_refs AS (
                     SELECT unnest(n."fileIds") as file_id, count(*) as ref_count
                     FROM note n
-                    WHERE n."fileIds" && %s
+                    WHERE n."fileIds" && %s::text[]
                     GROUP BY unnest(n."fileIds")
                 )
                 SELECT f.id, COALESCE(fr.ref_count, 0) as ref_count
@@ -195,7 +238,7 @@ class FileManager:
                 """
                 SELECT id, "isLink", "userHost"
                 FROM drive_file
-                WHERE id = ANY(%s)
+                WHERE id = ANY(%s::text[])
                 """,
                 [file_ids]
             )
@@ -241,7 +284,7 @@ class FileManager:
                 """
                 SELECT DISTINCT "avatarId", "bannerId"
                 FROM public.user
-                WHERE "avatarId" = ANY(%s) OR "bannerId" = ANY(%s)
+                WHERE "avatarId" = ANY(%s::text[]) OR "bannerId" = ANY(%s::text[])
                 """,
                 [file_ids, file_ids]
             )

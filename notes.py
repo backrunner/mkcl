@@ -26,28 +26,28 @@ class NoteManager:
             """PREPARE get_user_info AS
                SELECT id, host, "followersCount", "followingCount"
                FROM public.user
-               WHERE id = ANY($1)"""
+               WHERE id = ANY($1::text[])"""
         )
 
         self.db_cursor.execute(
             """PREPARE get_notes_by_id_range AS
-               SELECT id FROM note WHERE "id" < $1 AND "id" > $2"""
+               SELECT id FROM note WHERE "id" < $1::text AND "id" > $2::text"""
         )
 
         self.db_cursor.execute(
             """PREPARE get_pinned_notes AS
-               SELECT "noteId" FROM user_note_pining WHERE "noteId" = ANY($1)"""
+               SELECT "noteId" FROM user_note_pining WHERE "noteId" = ANY($1::text[])"""
         )
 
         self.db_cursor.execute(
             """PREPARE delete_note_history AS
                DELETE FROM note_history nh
-               WHERE nh."targetId" = ANY($1)"""
+               WHERE nh."targetId" = ANY($1::text[])"""
         )
 
         self.db_cursor.execute(
             """PREPARE delete_notes AS
-               DELETE FROM note WHERE id = ANY($1)"""
+               DELETE FROM note WHERE id = ANY($1::text[])"""
         )
 
     def get_notes_list(self, start_date, end_date):
@@ -73,8 +73,11 @@ class NoteManager:
         if not note_ids:
             return set()
 
+        # 确保note_ids是列表类型
+        note_ids = list(note_ids)
+        
         # 使用预编译语句
-        self.db_cursor.execute("EXECUTE get_pinned_notes (%s)", [note_ids])
+        self.db_cursor.execute("EXECUTE get_pinned_notes (%s::text[])", [note_ids])
         results = self.db_cursor.fetchall()
         return {str(result["noteId"]) for result in results}
 
@@ -153,15 +156,15 @@ class NoteManager:
                     WITH flag_status AS (
                         SELECT DISTINCT "noteId", TRUE as is_flagged
                         FROM (
-                            SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s)
+                            SELECT "noteId" FROM note_reaction WHERE "noteId" = ANY(%s::text[])
                             UNION ALL
-                            SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s)
+                            SELECT "noteId" FROM note_favorite WHERE "noteId" = ANY(%s::text[])
                             UNION ALL
-                            SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s)
+                            SELECT "noteId" FROM clip_note WHERE "noteId" = ANY(%s::text[])
                             UNION ALL
-                            SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s)
+                            SELECT "noteId" FROM note_unread WHERE "noteId" = ANY(%s::text[])
                             UNION ALL
-                            SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s)
+                            SELECT "noteId" FROM note_watching WHERE "noteId" = ANY(%s::text[])
                         ) combined_flags
                     )
                     SELECT
@@ -176,7 +179,7 @@ class NoteManager:
                         COALESCE(f.is_flagged, FALSE) as "isFlagged"
                     FROM note n
                     LEFT JOIN flag_status f ON n.id = f."noteId"
-                    WHERE n.id = ANY(%s)
+                    WHERE n.id = ANY(%s::text[])
                     """,
                     [note_ids, note_ids, note_ids, note_ids, note_ids, note_ids]
                 )
@@ -278,7 +281,7 @@ class NoteManager:
 
         if uncached_users:
             # 使用预编译语句
-            self.db_cursor.execute("EXECUTE get_user_info (%s)", [list(uncached_users)])
+            self.db_cursor.execute("EXECUTE get_user_info (%s::text[])", [list(uncached_users)])
 
             pipeline = redis_conn.pipeline()
             for row in self.db_cursor.fetchall():
@@ -340,6 +343,9 @@ class NoteManager:
         if not note_ids:
             return
 
+        # 确保note_ids是列表类型
+        note_ids = list(note_ids)
+
         # 先检查note_history表是否存在
         self.db_cursor.execute(
             """
@@ -355,10 +361,10 @@ class NoteManager:
         # 如果note_history表存在，先删除note_history表中的关联记录
         if note_history_exists:
             # 使用预编译语句批量删除
-            self.db_cursor.execute("EXECUTE delete_note_history (%s)", [note_ids])
+            self.db_cursor.execute("EXECUTE delete_note_history (%s::text[])", [note_ids])
 
         # 再删除note表中的记录
-        self.db_cursor.execute("EXECUTE delete_notes (%s)", [note_ids])
+        self.db_cursor.execute("EXECUTE delete_notes (%s::text[])", [note_ids])
 
         self.db_conn.commit()
 
@@ -474,7 +480,7 @@ class NoteManager:
 
         if uncached_users:
             # 使用预编译语句
-            self.db_cursor.execute("EXECUTE get_user_info (%s)", [list(uncached_users)])
+            self.db_cursor.execute("EXECUTE get_user_info (%s::text[])", [list(uncached_users)])
 
             pipeline = redis_conn.pipeline()
             for row in self.db_cursor.fetchall():

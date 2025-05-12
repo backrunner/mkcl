@@ -20,35 +20,9 @@ class NoteManager:
         self._prepare_statements()
 
     def _prepare_statements(self):
-        """预编译常用SQL语句"""
-        # 为常用查询准备语句名称，提高执行效率
-        self.db_cursor.execute(
-            """PREPARE get_user_info AS
-               SELECT id, host, "followersCount", "followingCount"
-               FROM public.user
-               WHERE id = ANY($1::text[])"""
-        )
-
-        self.db_cursor.execute(
-            """PREPARE get_notes_by_id_range AS
-               SELECT id FROM note WHERE "id" < $1::text AND "id" > $2::text"""
-        )
-
-        self.db_cursor.execute(
-            """PREPARE get_pinned_notes AS
-               SELECT "noteId" FROM user_note_pining WHERE "noteId" = ANY($1::text[])"""
-        )
-
-        self.db_cursor.execute(
-            """PREPARE delete_note_history AS
-               DELETE FROM note_history nh
-               WHERE nh."targetId" = ANY($1::text[])"""
-        )
-
-        self.db_cursor.execute(
-            """PREPARE delete_notes AS
-               DELETE FROM note WHERE id = ANY($1::text[])"""
-        )
+        """预编译常用SQL语句已不再使用，留空以保持兼容性"""
+        # 不再使用预编译语句，避免类型推断问题
+        pass
 
     def get_notes_list(self, start_date, end_date):
         """
@@ -79,8 +53,11 @@ class NoteManager:
         # 确保note_ids是列表类型
         note_ids = list(note_ids)
         
-        # 使用预编译语句
-        self.db_cursor.execute("EXECUTE get_pinned_notes (%s::text[])", [note_ids])
+        # 不使用预编译语句，直接使用参数化查询
+        self.db_cursor.execute(
+            """SELECT "noteId" FROM user_note_pining WHERE "noteId" = ANY(%s)""",
+            [note_ids]
+        )
         results = self.db_cursor.fetchall()
         return {str(result["noteId"]) for result in results}
 
@@ -283,8 +260,13 @@ class NoteManager:
         }
 
         if uncached_users:
-            # 使用预编译语句
-            self.db_cursor.execute("EXECUTE get_user_info (%s::text[])", [list(uncached_users)])
+            # 不使用预编译语句，直接使用参数化查询
+            self.db_cursor.execute(
+                """SELECT id, host, "followersCount", "followingCount"
+                   FROM public.user
+                   WHERE id = ANY(%s)""",
+                [list(uncached_users)]
+            )
 
             pipeline = redis_conn.pipeline()
             for row in self.db_cursor.fetchall():
@@ -363,11 +345,18 @@ class NoteManager:
 
         # 如果note_history表存在，先删除note_history表中的关联记录
         if note_history_exists:
-            # 使用预编译语句批量删除
-            self.db_cursor.execute("EXECUTE delete_note_history (%s::text[])", [note_ids])
+            # 不使用预编译语句，直接使用参数化查询
+            self.db_cursor.execute(
+                """DELETE FROM note_history nh
+                   WHERE nh."targetId" = ANY(%s)""",
+                [note_ids]
+            )
 
         # 再删除note表中的记录
-        self.db_cursor.execute("EXECUTE delete_notes (%s::text[])", [note_ids])
+        self.db_cursor.execute(
+            """DELETE FROM note WHERE id = ANY(%s)""",
+            [note_ids]
+        )
 
         self.db_conn.commit()
 
@@ -482,8 +471,13 @@ class NoteManager:
         }
 
         if uncached_users:
-            # 使用预编译语句
-            self.db_cursor.execute("EXECUTE get_user_info (%s::text[])", [list(uncached_users)])
+            # 不使用预编译语句，直接使用参数化查询
+            self.db_cursor.execute(
+                """SELECT id, host, "followersCount", "followingCount"
+                   FROM public.user
+                   WHERE id = ANY(%s)""",
+                [list(uncached_users)]
+            )
 
             pipeline = redis_conn.pipeline()
             for row in self.db_cursor.fetchall():

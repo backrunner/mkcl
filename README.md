@@ -1,6 +1,6 @@
 # mkcl
 
-基于原版 MKCL 的改进版本，支持进度展示 / 连接池。
+基于原版 MKCL 的改进版本，支持进度展示 / 连接池 / 自动性能优化。
 
 ## 概念
 
@@ -35,7 +35,11 @@
 pip install -r requirements.txt
 ```
 
-为了你的数据库跑得快一点，请使用下面的索引：
+### 自动性能优化
+
+**新功能**: 程序现在会自动检查和创建必要的索引以优化查询性能，同时检查PostgreSQL配置并提供优化建议。
+
+如果你希望手动创建索引（可选），可以使用下面的SQL：
 
 ```sql
 -- 基本索引
@@ -76,7 +80,7 @@ CREATE INDEX IF NOT EXISTS "idx_note_non_empty_fileids" ON note USING gin ("file
 
 -- 文件计数索引
 CREATE INDEX IF NOT EXISTS "idx_note_has_files" ON note ((array_length("fileIds", 1) > 0)) 
-     WHERE array_length("fileIds", 1) > 0
+     WHERE array_length("fileIds", 1) > 0;
 
 -- 联合索引
 CREATE INDEX IF NOT EXISTS "idx_user_is_local" ON public.user (id) 
@@ -84,18 +88,38 @@ CREATE INDEX IF NOT EXISTS "idx_user_is_local" ON public.user (id)
 
 -- 历史记录索引
 CREATE INDEX IF NOT EXISTS "idx_note_history_targetid" ON note_history("targetId");
+```
 
--- 可用参数
+### PostgreSQL配置优化建议
+
+程序会自动检查你的PostgreSQL配置并提供优化建议。通常建议的配置包括：
+
+```ini
+# postgresql.conf 优化建议
+work_mem = 256MB                    # 排序和哈希操作内存
+maintenance_work_mem = 1GB          # 维护操作内存  
+shared_buffers = 25% of RAM         # 共享缓冲区
+effective_cache_size = 75% of RAM   # 系统缓存大小
+random_page_cost = 1.1              # SSD优化
+checkpoint_completion_target = 0.9   # 检查点优化
+max_parallel_workers_per_gather = 4  # 并行查询
+```
+
+### 可用参数
 
 **注意**：该操作为不可逆操作，操作不当可能会使数据丢失，请慎重。
 
 强烈推荐使用 `gobackup` 等工具进行数据库备份。
 
 ``` bash
-python3 mkcl.py [-h] [-c PATH] [-d DAY] [-s DATE]
+python3 mkcl.py [-h] [-c PATH] [-d DAY] [-s DATE] [-w WEEK]
 ```
 
-`-c` 为misskey配置文件路径，默认`.config/default.yml` `-d` 为清理结束距今天数，默认为28 `-s`为清理开始日期默认为2021-01-01
+参数说明：
+- `-c` 为misskey配置文件路径，默认`.config/default.yml`
+- `-d` 为清理结束距今天数，默认为28
+- `-s` 为清理开始日期默认为2021-01-01
+- `-w` 周清模式，只会清理指定某一周的帖子数据
 
 例子:
 
@@ -103,7 +127,7 @@ python3 mkcl.py [-h] [-c PATH] [-d DAY] [-s DATE]
 python mkcl.py -d 50 -c config.yml -s 2020-12-01
 ```
 
-`-w` 周清模式，只会清理指定某一周的帖子数据，适合用于定时任务。
+周清模式（适合定时任务）：
 
 ```bash
 python3 mkcl.py -w 8 -c config.yml # 清除8周前到9周前的帖子

@@ -62,13 +62,13 @@ class FileManager:
 
     def get_single_files(self, start_date, end_date, redis_conn: RedisConnection):
         """
-        获取在一段时间内所有的单独文件id列表，使用批量查询优化
+        获取在一段时间内所有的单独文件id列表，使用优化的批量查询
         """
         start_id = generate_id(int(start_date.timestamp() * 1000))
         end_id = generate_id(int(end_date.timestamp() * 1000))
         print(f"扫描文件范围: {start_id}-{end_id}")
 
-        # 首先获取总数
+        # 使用更高效的计数查询
         try:
             self.db_cursor.execute(
                 '''SELECT COUNT(*) FROM drive_file
@@ -78,11 +78,10 @@ class FileManager:
                 [start_id, end_id]
             )
             result = self.db_cursor.fetchone()
-            # 安全检查：确保查询返回了结果
             total_count = result[0] if result else 0
+            print(f"预计扫描文件数量: {total_count:,}")
         except Exception as e:
             print(f"获取文件总数失败: {str(e)}")
-            # 回滚事务并重新连接
             try:
                 self.db_conn.rollback()
                 self.db_cursor = self.db_conn.cursor()
@@ -92,172 +91,190 @@ class FileManager:
 
         processed = 0
         deleted = 0
-        batch_size = 1000  # 增加批处理大小
+        batch_size = 2000  # 增加批处理大小
         last_id = start_id
-        max_retries = 3  # 最大重试次数
-        # 添加安全检查，防止无限循环
-        max_iterations = (total_count // batch_size) + 100  # 允许一些容错空间
+        max_retries = 3
+        max_iterations = (total_count // batch_size) + 100
         iteration_count = 0
-        last_processed_count = 0
-        stuck_counter = 0
+        
+        # 添加性能监控
+        import time
+        scan_start_time = time.time()
 
         with tqdm(total=total_count, desc="扫描单独文件") as pbar:
             while processed < total_count and iteration_count < max_iterations:
                 iteration_count += 1
-                
-                # 检查是否进度卡住
-                if processed == last_processed_count:
-                    stuck_counter += 1
-                    if stuck_counter > 5:  # 连续5次没有进度更新
-                        print(f"警告: 扫描进程可能卡住，当前处理数量: {processed}/{total_count}")
-                        print(f"当前last_id: {last_id}")
-                        # 尝试跳过当前ID
-                        try:
-                            last_id_int = int(last_id, 16) if last_id else 0
-                            last_id = format(last_id_int + batch_size, 'x')
-                            stuck_counter = 0
-                            print(f"跳转到新的last_id: {last_id}")
-                        except Exception as e:
-                            print(f"无法跳转ID，退出扫描: {str(e)}")
-                            break
-                else:
-                    stuck_counter = 0
-                
-                last_processed_count = processed
+                batch_start_time = time.time()
 
                 try:
+                    # 使用优化的查询，一次性获取所需的所有信息
                     self.db_cursor.execute(
-                        '''SELECT id
-                        FROM drive_file
-                        WHERE id >= %s::text
-                        AND id <= %s::text
-                        AND "isLink" IS TRUE
-                        AND "userHost" IS NOT NULL
-                        ORDER BY id
+                        '''SELECT df.id, df."userHost"
+                        FROM drive_file df
+                        WHERE df.id > %s::text 
+                        AND df.id <= %s::text
+                        AND df."isLink" IS TRUE
+                        AND df."userHost" IS NOT NULL
+                        ORDER BY df.id
                         LIMIT %s''',
                         [last_id, end_id, batch_size]
                     )
                     results = self.db_cursor.fetchall()
+                    
                     if not results:
                         print("没有更多结果，退出扫描")
                         break
 
                     file_ids = [result[0] for result in results]
-                    # 确保last_id正确更新，防止无限循环
-                    if file_ids:
-                        new_last_id = file_ids[-1]
-                        # 检查ID是否有进展
-                        if new_last_id == last_id:
-                            print(f"ID没有进展，尝试递增: {last_id}")
-                            try:
-                                last_id_int = int(last_id, 16)
-                                last_id = format(last_id_int + 1, 'x')
-                            except Exception:
-                                break
-                        else:
-                            last_id = new_last_id
+                    last_id = file_ids[-1]
 
-                    # 过滤掉已缓存的文件ID
-                    uncached_file_ids = []
-                    for fid in file_ids:
-                        try:
-                            is_cached = redis_conn.execute(
-                                lambda: redis_conn.client.sismember('file_cache', fid)
-                            )
-                            if not is_cached:
-                                uncached_file_ids.append(fid)
-                        except Exception as e:
-                            print(f"检查文件缓存状态失败 (file_id: {fid}): {str(e)}")
-                            # 保守处理，将未能确认的ID添加到处理列表
-                            uncached_file_ids.append(fid)
-
-                    if uncached_file_ids:
-                        # 批量获取文件引用
-                        retry_count = 0
-                        file_refs = {}
-                        avatar_banner_files = set()
-                        
-                        while retry_count < max_retries:
-                            try:
-                                # 确保每次重试前回滚任何失败的事务
-                                self.db_conn.rollback()
-                                
-                                # 依次处理每个查询，确保在错误时可以继续流程
-                                try:
-                                    file_refs = self.get_file_references_batch(uncached_file_ids)
-                                except Exception as e:
-                                    print(f"批量获取文件引用数失败: {str(e)}")
-                                    self.db_conn.rollback()
-                                    # 但不中断循环，继续尝试其他查询
-                                
-                                try:
-                                    # 批量检查头像和横幅使用
-                                    avatar_banner_files = self.check_user_avatar_banner_batch(uncached_file_ids)
-                                except Exception as e:
-                                    print(f"批量检查用户头像和横幅失败: {str(e)}")
-                                    self.db_conn.rollback()
-                                
-                                # 如果至少有一个查询成功，继续处理
-                                break
-                            except Exception as e:
-                                retry_count += 1
-                                if retry_count >= max_retries:
-                                    print(f"获取文件信息失败，已达最大重试次数: {str(e)}")
-                                    # 继续处理下一批
-                                else:
-                                    print(f"获取文件信息失败，重试 {retry_count}/{max_retries}: {str(e)}")
-                                    # 等待短暂时间后重试
-                                    import time
-                                    time.sleep(0.5)
-                                
-                                # 回滚任何失败的事务并重新创建游标
-                                try:
-                                    self.db_conn.rollback()
-                                    self.db_cursor = self.db_conn.cursor()
-                                except Exception:
-                                    pass
-
-                        # 找出单独文件
-                        for file_id in uncached_file_ids:
-                            if file_refs.get(file_id, 0) == 0 and file_id not in avatar_banner_files:
-                                try:
-                                    redis_conn.execute(
-                                        lambda: redis_conn.client.sadd('files_to_delete', file_id)
-                                    )
-                                    deleted += 1
-                                except Exception as e:
-                                    print(f"添加文件到删除集合失败 (file_id: {file_id}): {str(e)}")
-
+                    # 并行处理文件检查
+                    files_to_delete_batch = self._process_files_batch_optimized(
+                        file_ids, redis_conn, max_retries)
+                    
+                    deleted += files_to_delete_batch
                     current_batch_size = len(file_ids)
                     processed += current_batch_size
 
+                    # 计算性能指标
+                    batch_time = time.time() - batch_start_time
+                    total_time = time.time() - scan_start_time
+                    avg_speed = processed / total_time if total_time > 0 else 0
+
                     pbar.update(current_batch_size)
                     pbar.set_postfix({
-                        '已处理': processed,
-                        '待删除': deleted,
-                        '迭代': iteration_count
+                        '已处理': f"{processed:,}",
+                        '待删除': f"{deleted:,}",
+                        '速度': f"{avg_speed:.0f}/s",
+                        '批次时间': f"{batch_time:.1f}s"
                     })
+
                 except Exception as e:
                     print(f"处理文件批次失败，跳过当前批次: {str(e)}")
-                    # 移动到下一批，避免卡在同一位置
                     try:
-                        # 回滚事务
                         self.db_conn.rollback()
-                        # 尝试重新初始化连接
                         self.db_cursor = self.db_conn.cursor()
-                        # 增加last_id，避免无限循环
                         last_id_increment = int(last_id, 16) + batch_size if last_id else batch_size
                         last_id = format(last_id_increment, 'x')
                         print(f"跳转到新的起始ID: {last_id}")
                     except Exception as conn_error:
                         print(f"重新初始化连接失败: {str(conn_error)}")
-                        # 如果连接恢复失败，退出循环
                         break
 
-        if iteration_count >= max_iterations:
-            print(f"警告: 达到最大迭代次数 ({max_iterations})，可能存在数据异常")
+        total_scan_time = time.time() - scan_start_time
+        avg_speed = processed / total_scan_time if total_scan_time > 0 else 0
         
-        print(f"\n找到 {deleted} 个单独文件需要删除")
+        print(f"\n文件扫描完成:")
+        print(f"- 总处理时间: {total_scan_time:.1f}秒")
+        print(f"- 平均速度: {avg_speed:.0f} 文件/秒")
+        print(f"- 找到 {deleted:,} 个单独文件需要删除")
+        
+    def _process_files_batch_optimized(self, file_ids, redis_conn, max_retries):
+        """
+        优化的批量文件处理
+        """
+        deleted_count = 0
+        
+        # 过滤已缓存的文件
+        uncached_file_ids = []
+        try:
+            # 使用管道批量检查缓存状态
+            pipeline = redis_conn.pipeline()
+            for fid in file_ids:
+                pipeline.sismember('file_cache', fid)
+            cache_results = redis_conn.execute(lambda: pipeline.execute())
+            
+            uncached_file_ids = [fid for fid, is_cached in zip(file_ids, cache_results) if not is_cached]
+        except Exception as e:
+            print(f"批量检查缓存失败: {str(e)}")
+            uncached_file_ids = file_ids  # 保守处理
+
+        if not uncached_file_ids:
+            return 0
+
+        # 批量处理文件信息
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                # 使用单一优化查询获取所有需要的信息
+                file_info = self._get_file_info_optimized(uncached_file_ids)
+                
+                # 找出单独文件并批量添加到Redis
+                files_to_delete = []
+                for file_id, info in file_info.items():
+                    if info['ref_count'] == 0 and not info['is_avatar_banner']:
+                        files_to_delete.append(file_id)
+                
+                if files_to_delete:
+                    # 批量添加到Redis
+                    redis_conn.execute(
+                        lambda: redis_conn.client.sadd('files_to_delete', *files_to_delete)
+                    )
+                    deleted_count = len(files_to_delete)
+                
+                break
+                
+            except Exception as e:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print(f"批量处理文件失败，已达最大重试次数: {str(e)}")
+                else:
+                    print(f"批量处理文件失败，重试 {retry_count}/{max_retries}: {str(e)}")
+                    import time
+                    time.sleep(0.5)
+                
+                try:
+                    self.db_conn.rollback()
+                    self.db_cursor = self.db_conn.cursor()
+                except Exception:
+                    pass
+        
+        return deleted_count
+
+    def _get_file_info_optimized(self, file_ids):
+        """
+        使用单一优化查询获取文件的所有相关信息
+        """
+        if not file_ids:
+            return {}
+        
+        # 使用CTE和左连接的优化查询，一次性获取所有信息
+        self.db_cursor.execute("""
+            WITH file_list AS (
+                SELECT unnest(%s::text[]) as file_id
+            ),
+            file_refs AS (
+                SELECT 
+                    unnest(n."fileIds"::text[]) as file_id, 
+                    count(*) as ref_count
+                FROM note n
+                WHERE n."fileIds"::text[] && %s::text[]
+                GROUP BY unnest(n."fileIds"::text[])
+            ),
+            avatar_banner_files AS (
+                SELECT DISTINCT "avatarId" as file_id FROM public.user 
+                WHERE "avatarId" = ANY(%s::text[])
+                UNION
+                SELECT DISTINCT "bannerId" as file_id FROM public.user 
+                WHERE "bannerId" = ANY(%s::text[])
+            )
+            SELECT 
+                fl.file_id,
+                COALESCE(fr.ref_count, 0) as ref_count,
+                CASE WHEN abf.file_id IS NOT NULL THEN true ELSE false END as is_avatar_banner
+            FROM file_list fl
+            LEFT JOIN file_refs fr ON fl.file_id = fr.file_id
+            LEFT JOIN avatar_banner_files abf ON fl.file_id = abf.file_id
+        """, [file_ids, file_ids, file_ids, file_ids])
+        
+        results = self.db_cursor.fetchall()
+        return {
+            row[0]: {
+                'ref_count': row[1],
+                'is_avatar_banner': row[2]
+            }
+            for row in results
+        }
 
     def get_file_references_batch(self, file_ids):
         """

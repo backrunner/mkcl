@@ -7,10 +7,199 @@ from tqdm import tqdm
 from connection import RedisConnection, DatabaseConnection
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import cpu_count
+from typing import Dict, Any, Tuple
 import traceback
 import psycopg
 from redis.exceptions import ConnectionError, TimeoutError
 import time
+
+def _optimize_database_indexes(db_conn):
+    """
+    检查并创建必要的索引以优化查询性能
+    """
+    cursor = db_conn.cursor()
+    
+    # 首先检查和优化PostgreSQL配置
+    _check_postgresql_config(cursor)
+    
+    # 关键索引列表 - 根据查询模式优化，与README.md保持一致
+    indexes_to_check = [
+        # Note表基本索引 - 与README.md一致
+        ("idx_note_id_composite", "note", '(id, "userId", "userHost", "renoteId", "replyId")'),
+        ("idx_note_renote_reply", "note", '("renoteId", "replyId")'),
+        ("idx_note_fileids", "note", '"fileIds"', "gin"),
+        
+        # 时间范围查询优化 - 与README.md一致
+        ("idx_note_id_range", "note", "id DESC"),
+        ("idx_drive_file_id_range", "drive_file", "id DESC"),
+        ("idx_drive_file_link_host_id", "drive_file", '("isLink", "userHost", id)', "btree", 'WHERE "isLink" IS TRUE AND "userHost" IS NOT NULL'),
+        ("idx_drive_file_link_host_id_btree", "drive_file", "id", "btree", 'WHERE "isLink" IS TRUE AND "userHost" IS NOT NULL'),
+        
+        # User表索引 - 与README.md一致
+        ("idx_user_avatar_banner", "user", '("avatarId", "bannerId")'),
+        ("idx_user_host_composite", "user", '(host, "followersCount", "followingCount")'),
+        ("idx_user_id_host_counts", "user", '(id, host, "followersCount", "followingCount")'),
+        ("idx_user_is_local", "user", "id", "btree", "WHERE host IS NULL"),
+        
+        # Note关联表索引 - 与README.md一致
+        ("idx_note_reaction_noteid", "note_reaction", '"noteId"'),
+        ("idx_note_favorite_noteid", "note_favorite", '"noteId"'),
+        ("idx_clip_note_noteid", "clip_note", '"noteId"'),
+        ("idx_note_unread_noteid", "note_unread", '"noteId"'),
+        ("idx_note_watching_noteid", "note_watching", '"noteId"'),
+        ("idx_user_note_pining_noteid", "user_note_pining", '"noteId"'),
+        
+        # 帖子分析优化索引 - 与README.md一致
+        ("idx_note_userid_composite", "note", '("userId", "userHost", "hasPoll")', "btree", 'WHERE "hasPoll" = true OR "userHost" IS NULL'),
+        
+        # GIN索引 - 与README.md一致
+        ("idx_note_non_empty_fileids", "note", '"fileIds"', "gin", 'WHERE array_length("fileIds", 1) > 0'),
+        
+        # 文件计数索引 - 与README.md一致
+        ("idx_note_has_files", "note", '(array_length("fileIds", 1) > 0)', "btree", 'WHERE array_length("fileIds", 1) > 0'),
+        
+        # 历史记录索引 - 与README.md一致
+        ("idx_note_history_targetid", "note_history", '"targetId"'),
+    ]
+    
+    print("正在检查和创建性能优化索引...")
+    
+    for index_info in indexes_to_check:
+        index_name = index_info[0]
+        table_name = index_info[1]
+        columns = index_info[2]
+        index_type = index_info[3] if len(index_info) > 3 else "btree"
+        where_clause = index_info[4] if len(index_info) > 4 else ""
+        
+        try:
+            # 检查索引是否存在
+            cursor.execute("""
+                SELECT 1 FROM pg_indexes 
+                WHERE indexname = %s AND tablename = %s
+            """, [index_name, table_name])
+            
+            if not cursor.fetchone():
+                # 检查表是否存在
+                cursor.execute("""
+                    SELECT 1 FROM information_schema.tables 
+                    WHERE table_name = %s AND table_schema = 'public'
+                """, [table_name])
+                
+                if cursor.fetchone():
+                    # 构建创建索引的SQL
+                    if index_type == "gin":
+                        create_sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name} ON {table_name} USING gin ({columns})'
+                    else:
+                        create_sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name} ON {table_name} ({columns})'
+                    
+                    # 添加WHERE条件（如果有）
+                    if where_clause:
+                        create_sql += f' {where_clause}'
+                    
+                    print(f"创建索引: {index_name}")
+                    cursor.execute(create_sql)
+                    db_conn.commit()
+                else:
+                    print(f"表 {table_name} 不存在，跳过索引 {index_name}")
+            else:
+                print(f"索引 {index_name} 已存在")
+                
+        except Exception as e:
+            print(f"处理索引 {index_name} 时出错: {str(e)}")
+            # 回滚并继续处理下一个索引
+            try:
+                db_conn.rollback()
+            except:
+                pass
+    
+    # 更新表统计信息
+    try:
+        print("更新表统计信息...")
+        tables_to_analyze = ['note', 'drive_file', 'user', 'note_reaction', 'note_favorite', 
+                           'clip_note', 'note_unread', 'note_watching']
+        
+        for table in tables_to_analyze:
+            try:
+                cursor.execute(f"ANALYZE {table}")
+                db_conn.commit()
+            except Exception as e:
+                print(f"分析表 {table} 失败: {str(e)}")
+                db_conn.rollback()
+                
+    except Exception as e:
+        print(f"更新统计信息失败: {str(e)}")
+
+def _check_postgresql_config(cursor):
+    """
+    检查PostgreSQL配置并提供优化建议
+    """
+    print("检查PostgreSQL配置...")
+    
+    config_checks = [
+        ('work_mem', '256MB', '工作内存'),
+        ('maintenance_work_mem', '1GB', '维护工作内存'),
+        ('shared_buffers', '25%RAM', '共享缓冲区'),
+        ('effective_cache_size', '75%RAM', '有效缓存大小'),
+        ('random_page_cost', '1.1', '随机页面成本'),
+        ('checkpoint_completion_target', '0.9', '检查点完成目标'),
+        ('max_connections', '200', '最大连接数'),
+        ('max_parallel_workers_per_gather', '4', '并行工作进程数')
+    ]
+    
+    print("\n=== PostgreSQL 配置检查 ===")
+    optimizations_needed = []
+    
+    for setting, recommended, description in config_checks:
+        try:
+            cursor.execute(f"SHOW {setting}")
+            result = cursor.fetchone()
+            current_value = result[0] if result else 'unknown'
+            
+            if setting == 'work_mem':
+                current_mb = _parse_memory_value(current_value)
+                if current_mb < 256:
+                    optimizations_needed.append(f"SET work_mem = '256MB';  -- 当前: {current_value}")
+                    
+            elif setting == 'maintenance_work_mem':
+                current_mb = _parse_memory_value(current_value)
+                if current_mb < 1024:
+                    optimizations_needed.append(f"SET maintenance_work_mem = '1GB';  -- 当前: {current_value}")
+                    
+            elif setting == 'random_page_cost':
+                if float(current_value) > 2.0:
+                    optimizations_needed.append(f"SET random_page_cost = 1.1;  -- 当前: {current_value}")
+                    
+            print(f"  {description} ({setting}): {current_value}")
+            
+        except Exception as e:
+            print(f"  检查 {setting} 失败: {str(e)}")
+    
+    if optimizations_needed:
+        print(f"\n=== 建议的优化配置 ===")
+        print("请考虑在postgresql.conf中应用以下配置:")
+        for opt in optimizations_needed:
+            print(f"  {opt}")
+        print("\n注意: 修改配置后需要重启PostgreSQL服务")
+    else:
+        print("  PostgreSQL配置看起来不错!")
+
+def _parse_memory_value(memory_str):
+    """
+    解析PostgreSQL内存值为MB
+    """
+    try:
+        memory_str = memory_str.lower().strip()
+        if memory_str.endswith('gb'):
+            return int(float(memory_str[:-2]) * 1024)
+        elif memory_str.endswith('mb'):
+            return int(float(memory_str[:-2]))
+        elif memory_str.endswith('kb'):
+            return int(float(memory_str[:-2]) / 1024)
+        else:
+            # 假设是字节
+            return int(float(memory_str) / (1024 * 1024))
+    except:
+        return 0
 
 class CleanupError(Exception):
     """清理过程中的错误基类"""
@@ -53,6 +242,14 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180):
     # 使用新的 Redis 连接管理器
     redis_conn = RedisConnection(redis_info)
     db = DatabaseConnection(db_info)
+    
+    # 添加索引优化步骤
+    print("检查和优化数据库索引...")
+    try:
+        with db.get_connection() as db_conn:
+            _optimize_database_indexes(db_conn)
+    except Exception as e:
+        print(f"索引优化失败，继续执行: {str(e)}")
 
     # 清理之前的缓存数据
     print("清理历史缓存...")

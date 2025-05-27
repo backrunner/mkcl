@@ -6,6 +6,7 @@ import threading
 from multiprocessing import cpu_count
 from psycopg.rows import dict_row
 from psycopg import sql
+from tqdm import tqdm
 
 class NoteManager:
     """
@@ -24,20 +25,64 @@ class NoteManager:
         # 不再使用预编译语句，避免类型推断问题
         pass
 
-    def get_notes_list(self, start_date, end_date):
+    def get_notes_list(self, start_date, end_date, batch_size=10000):
         """
-        获取在一段时间内所有的note id列表
+        获取在一段时间内所有的note id列表，使用高效的游标分页
         """
         start_id = generate_id(int(start_date.timestamp() * 1000))
         end_id = generate_id(int(end_date.timestamp() * 1000))
-
-        # 不使用预编译语句，直接使用参数化查询
-        self.db_cursor.execute(
-            """SELECT id FROM note WHERE "id" < %s AND "id" > %s""",
-            [end_id, start_id]
-        )
-        results = self.db_cursor.fetchall()
-        return [result["id"] for result in results]
+        
+        print(f"扫描Note范围: {start_id} 到 {end_id}")
+        
+        # 首先获取总数估计
+        try:
+            self.db_cursor.execute(
+                """SELECT reltuples::bigint as estimate
+                FROM pg_class 
+                WHERE relname = 'note'""")
+            result = self.db_cursor.fetchone()
+            total_estimate = result["estimate"] if result else 0
+            print(f"Note表估计总数: {total_estimate:,}")
+        except Exception as e:
+            print(f"获取表大小估计失败: {str(e)}")
+        
+        all_notes = []
+        last_id = start_id
+        processed_count = 0
+        
+        # 使用游标分页，避免OFFSET性能问题
+        with tqdm(desc="收集Note ID", unit="个") as pbar:
+            while True:
+                # 使用索引友好的范围查询
+                self.db_cursor.execute(
+                    """SELECT id FROM note 
+                    WHERE id > %s AND id < %s 
+                    ORDER BY id 
+                    LIMIT %s""",
+                    [last_id, end_id, batch_size]
+                )
+                
+                results = self.db_cursor.fetchall()
+                if not results:
+                    break
+                
+                batch_notes = [result["id"] for result in results]
+                all_notes.extend(batch_notes)
+                
+                # 更新进度
+                processed_count += len(batch_notes)
+                pbar.update(len(batch_notes))
+                pbar.set_postfix({'已收集': processed_count})
+                
+                # 更新last_id为当前批次的最后一个ID
+                last_id = batch_notes[-1]
+                
+                # 如果返回的结果少于batch_size，说明已经到达末尾
+                if len(batch_notes) < batch_size:
+                    break
+        
+        print(f"共收集到 {len(all_notes):,} 个Note ID")
+        return all_notes
 
     def get_pinned_notes(self, note_ids):
         """

@@ -139,7 +139,7 @@ class FileManager:
                             print("没有更多结果，退出扫描")
                         break
 
-                    file_ids = [result[0] for result in results]
+                    file_ids = [result["id"] for result in results]
                     last_id = file_ids[-1]
 
                     # 使用优化的批量处理
@@ -168,7 +168,7 @@ class FileManager:
                         print(f"处理文件批次失败，跳过当前批次: {str(e)}")
                     # 尝试跳转到下一个批次
                     if results:
-                        last_id = results[-1][0]
+                        last_id = results[-1]["id"]
                         if self.verbose:
                             print(f"跳转到新的起始ID: {last_id}")
                     # 尝试重新初始化连接
@@ -305,8 +305,8 @@ class FileManager:
             ref_results = {}
             for row in self.db_cursor.fetchall():
                 try:
-                    if len(row) >= 2:
-                        ref_results[row[0]] = row[1]
+                    if "file_id" in row and "ref_count" in row:
+                        ref_results[row["file_id"]] = row["ref_count"]
                     else:
                         if self.verbose:
                             print(f"警告：引用结果行数据不完整: {row}")
@@ -327,8 +327,8 @@ class FileManager:
             avatar_banner_files = set()
             for row in self.db_cursor.fetchall():
                 try:
-                    if len(row) >= 1 and row[0]:
-                        avatar_banner_files.add(row[0])
+                    if "file_id" in row and row["file_id"]:
+                        avatar_banner_files.add(row["file_id"])
                 except Exception as row_error:
                     if self.verbose:
                         print(f"处理头像横幅行数据时出错: {row}, 错误: {str(row_error)}")
@@ -392,10 +392,10 @@ class FileManager:
         file_info = {}
         for row in results:
             try:
-                if len(row) >= 3:
-                    file_info[row[0]] = {
-                        'ref_count': row[1],
-                        'is_avatar_banner': row[2]
+                if "file_id" in row and "ref_count" in row and "is_avatar_banner" in row:
+                    file_info[row["file_id"]] = {
+                        'ref_count': row["ref_count"],
+                        'is_avatar_banner': row["is_avatar_banner"]
                     }
                 else:
                     if self.verbose:
@@ -448,8 +448,8 @@ class FileManager:
             ref_dict = {}
             for row in results:
                 try:
-                    if len(row) >= 2:  # 确保行有足够的列
-                        ref_dict[row[0]] = row[1]
+                    if "id" in row and "ref_count" in row:
+                        ref_dict[row["id"]] = row["ref_count"]
                     else:
                         if self.verbose:
                             print(f"警告：引用计数行数据不完整: {row}")
@@ -506,10 +506,10 @@ class FileManager:
             file_info = {}
             for row in results:
                 try:
-                    if len(row) >= 3:  # 确保行有足够的列
-                        file_info[row[0]] = {
-                            "isLink": row[1] if row[1] is not None else False,
-                            "userHost": row[2]
+                    if "id" in row and "isLink" in row and "userHost" in row:
+                        file_info[row["id"]] = {
+                            "isLink": row["isLink"] if row["isLink"] is not None else False,
+                            "userHost": row["userHost"]
                         }
                     else:
                         if self.verbose:
@@ -563,11 +563,18 @@ class FileManager:
                 return set()
 
             used_files = set()
-            for avatar_id, banner_id in results:
-                if avatar_id:
-                    used_files.add(avatar_id)
-                if banner_id:
-                    used_files.add(banner_id)
+            for row in results:
+                try:
+                    avatar_id = row.get("avatarId")
+                    banner_id = row.get("bannerId")
+                    if avatar_id:
+                        used_files.add(avatar_id)
+                    if banner_id:
+                        used_files.add(banner_id)
+                except Exception as row_error:
+                    if self.verbose:
+                        print(f"处理用户头像横幅行数据时出错: {row}, 错误: {str(row_error)}")
+                    continue
             return used_files
 
         except Exception as e:

@@ -24,7 +24,7 @@ def _create_index_safely(db_connection_manager, index_name, table_name, columns,
             old_autocommit = conn.autocommit
             conn.autocommit = True
             cursor = conn.cursor()
-            
+
             try:
                 # 尝试CONCURRENTLY创建
                 concurrent_sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name} ON {table_name}'
@@ -32,17 +32,17 @@ def _create_index_safely(db_connection_manager, index_name, table_name, columns,
                     concurrent_sql += f' USING gin ({columns})'
                 else:
                     concurrent_sql += f' ({columns})'
-                
+
                 if where_clause:
                     concurrent_sql += f' {where_clause}'
-                
+
                 cursor.execute(concurrent_sql)
                 print(f"✓ 索引 {index_name} 创建成功 (CONCURRENTLY)")
                 return True
-                
+
             except Exception as e:
                 print(f"CONCURRENTLY模式失败: {str(e)}")
-                
+
                 # 回退到普通模式
                 try:
                     normal_sql = f'CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}'
@@ -50,20 +50,20 @@ def _create_index_safely(db_connection_manager, index_name, table_name, columns,
                         normal_sql += f' USING gin ({columns})'
                     else:
                         normal_sql += f' ({columns})'
-                    
+
                     if where_clause:
                         normal_sql += f' {where_clause}'
-                    
+
                     cursor.execute(normal_sql)
                     print(f"✓ 索引 {index_name} 创建成功 (普通模式)")
                     return True
-                    
+
                 except Exception as normal_error:
                     print(f"✗ 索引 {index_name} 创建失败: {str(normal_error)}")
                     return False
             finally:
                 conn.autocommit = old_autocommit
-                
+
     except Exception as conn_error:
         print(f"✗ 连接错误，无法创建索引 {index_name}: {str(conn_error)}")
         return False
@@ -75,29 +75,29 @@ def _optimize_database_indexes(db_connection_manager):
     # 获取一个连接用于索引检查
     with db_connection_manager.get_connection() as db_conn:
         cursor = db_conn.cursor()
-        
+
         # 首先检查和优化PostgreSQL配置
         _check_postgresql_config(cursor)
-        
+
         # 关键索引列表 - 根据查询模式优化，与README.md保持一致
         indexes_to_check = [
             # Note表基本索引 - 与README.md一致
             ("idx_note_id_composite", "note", '(id, "userId", "userHost", "renoteId", "replyId")'),
             ("idx_note_renote_reply", "note", '("renoteId", "replyId")'),
             ("idx_note_fileids", "note", '"fileIds"', "gin"),
-            
+
             # 时间范围查询优化 - 与README.md一致
             ("idx_note_id_range", "note", "id DESC"),
             ("idx_drive_file_id_range", "drive_file", "id DESC"),
             ("idx_drive_file_link_host_id", "drive_file", '("isLink", "userHost", id)', "btree", 'WHERE "isLink" IS TRUE AND "userHost" IS NOT NULL'),
             ("idx_drive_file_link_host_id_btree", "drive_file", "id", "btree", 'WHERE "isLink" IS TRUE AND "userHost" IS NOT NULL'),
-            
+
             # User表索引 - 与README.md一致
             ("idx_user_avatar_banner", "user", '("avatarId", "bannerId")'),
             ("idx_user_host_composite", "user", '(host, "followersCount", "followingCount")'),
             ("idx_user_id_host_counts", "user", '(id, host, "followersCount", "followingCount")'),
             ("idx_user_is_local", "user", "id", "btree", "WHERE host IS NULL"),
-            
+
             # Note关联表索引 - 与README.md一致
             ("idx_note_reaction_noteid", "note_reaction", '"noteId"'),
             ("idx_note_favorite_noteid", "note_favorite", '"noteId"'),
@@ -105,46 +105,46 @@ def _optimize_database_indexes(db_connection_manager):
             ("idx_note_unread_noteid", "note_unread", '"noteId"'),
             ("idx_note_watching_noteid", "note_watching", '"noteId"'),
             ("idx_user_note_pining_noteid", "user_note_pining", '"noteId"'),
-            
+
             # 帖子分析优化索引 - 与README.md一致
             ("idx_note_userid_composite", "note", '("userId", "userHost", "hasPoll")', "btree", 'WHERE "hasPoll" = true OR "userHost" IS NULL'),
-            
+
             # GIN索引 - 与README.md一致
             ("idx_note_non_empty_fileids", "note", '"fileIds"', "gin", 'WHERE array_length("fileIds", 1) > 0'),
-            
+
             # 文件计数索引 - 与README.md一致
             ("idx_note_has_files", "note", '(array_length("fileIds", 1) > 0)', "btree", 'WHERE array_length("fileIds", 1) > 0'),
-            
+
             # 历史记录索引 - 与README.md一致
             ("idx_note_history_targetid", "note_history", '"targetId"'),
         ]
-        
+
         print("正在检查和创建性能优化索引...")
         created_count = 0
         skipped_count = 0
         failed_count = 0
-        
+
         for index_info in indexes_to_check:
             index_name = index_info[0]
             table_name = index_info[1]
             columns = index_info[2]
             index_type = index_info[3] if len(index_info) > 3 else "btree"
             where_clause = index_info[4] if len(index_info) > 4 else ""
-            
+
             try:
                 # 检查索引是否存在
                 cursor.execute("""
-                    SELECT 1 FROM pg_indexes 
+                    SELECT 1 FROM pg_indexes
                     WHERE indexname = %s AND tablename = %s
                 """, [index_name, table_name])
-                
+
                 if not cursor.fetchone():
                     # 检查表是否存在
                     cursor.execute("""
-                        SELECT 1 FROM information_schema.tables 
+                        SELECT 1 FROM information_schema.tables
                         WHERE table_name = %s AND table_schema = 'public'
                     """, [table_name])
-                    
+
                     if cursor.fetchone():
                         print(f"创建索引: {index_name}")
                         if _create_index_safely(db_connection_manager, index_name, table_name, columns, index_type, where_clause):
@@ -156,7 +156,7 @@ def _optimize_database_indexes(db_connection_manager):
                         skipped_count += 1
                 else:
                     print(f"索引 {index_name} 已存在")
-                    
+
             except Exception as e:
                 print(f"处理索引 {index_name} 时出错: {str(e)}")
                 failed_count += 1
@@ -165,20 +165,20 @@ def _optimize_database_indexes(db_connection_manager):
                     db_conn.rollback()
                 except:
                     pass
-        
+
         print(f"\n索引创建总结:")
         print(f"  ✓ 成功创建: {created_count} 个")
         print(f"  - 跳过: {skipped_count} 个")
         print(f"  ✗ 失败: {failed_count} 个")
-        
+
         # 更新表统计信息
         try:
             print("\n更新表统计信息...")
             tables_to_analyze = [
-                'note', 'drive_file', '"user"', 'note_reaction', 'note_favorite', 
+                'note', 'drive_file', '"user"', 'note_reaction', 'note_favorite',
                 'clip_note', 'note_unread', 'note_watching'
             ]
-            
+
             analyze_success = 0
             for table in tables_to_analyze:
                 try:
@@ -195,9 +195,9 @@ def _optimize_database_indexes(db_connection_manager):
                         db_conn.rollback()
                     except:
                         pass
-            
+
             print(f"统计信息更新完成: {analyze_success}/{len(tables_to_analyze)} 个表")
-                    
+
         except Exception as e:
             print(f"更新统计信息失败: {str(e)}")
 
@@ -206,7 +206,7 @@ def _check_postgresql_config(cursor):
     检查PostgreSQL配置并提供优化建议
     """
     print("检查PostgreSQL配置...")
-    
+
     config_checks = [
         ('work_mem', '256MB', '工作内存'),
         ('maintenance_work_mem', '1GB', '维护工作内存'),
@@ -217,35 +217,35 @@ def _check_postgresql_config(cursor):
         ('max_connections', '200', '最大连接数'),
         ('max_parallel_workers_per_gather', '4', '并行工作进程数')
     ]
-    
+
     print("\n=== PostgreSQL 配置检查 ===")
     optimizations_needed = []
-    
+
     for setting, recommended, description in config_checks:
         try:
             cursor.execute(f"SHOW {setting}")
             result = cursor.fetchone()
             current_value = result[0] if result else 'unknown'
-            
+
             if setting == 'work_mem':
                 current_mb = _parse_memory_value(current_value)
                 if current_mb < 256:
                     optimizations_needed.append(f"SET work_mem = '256MB';  -- 当前: {current_value}")
-                    
+
             elif setting == 'maintenance_work_mem':
                 current_mb = _parse_memory_value(current_value)
                 if current_mb < 1024:
                     optimizations_needed.append(f"SET maintenance_work_mem = '1GB';  -- 当前: {current_value}")
-                    
+
             elif setting == 'random_page_cost':
                 if float(current_value) > 2.0:
                     optimizations_needed.append(f"SET random_page_cost = 1.1;  -- 当前: {current_value}")
-                    
+
             print(f"  {description} ({setting}): {current_value}")
-            
+
         except Exception as e:
             print(f"  检查 {setting} 失败: {str(e)}")
-    
+
     if optimizations_needed:
         print(f"\n=== 建议的优化配置 ===")
         print("请考虑在postgresql.conf中应用以下配置:")
@@ -302,21 +302,21 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
     print(f"配置超时时间: {timeout_minutes} 分钟")
     if verbose:
         print("启用详细调试模式")
-    
+
     # 全局超时控制
     global_start_time = time.time()
     global_timeout_seconds = timeout_minutes * 60
-    
+
     def check_global_timeout():
         """检查是否超过全局超时时间"""
         if time.time() - global_start_time > global_timeout_seconds:
-            raise CleanupError(f"全局操作超时 ({timeout_minutes} 分钟)", "全局超时检查", 
+            raise CleanupError(f"全局操作超时 ({timeout_minutes} 分钟)", "全局超时检查",
                              f"运行时间已超过 {timeout_minutes} 分钟")
 
     # 使用新的 Redis 连接管理器
     redis_conn = RedisConnection(redis_info)
     db = DatabaseConnection(db_info)
-    
+
     # 添加索引优化步骤
     print("检查和优化数据库索引...")
     try:
@@ -390,7 +390,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                     while notes_to_process:
                         # 检查全局超时
                         check_global_timeout()
-                        
+
                         current_batch = notes_to_process[:batch_size]
                         notes_to_process = notes_to_process[batch_size:]
 
@@ -418,7 +418,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
             print("\n步骤 3/5: 删除note...")
             # 检查全局超时
             check_global_timeout()
-            
+
             # 批量获取待删除的notes
             try:
                 notes_to_delete = redis_conn.execute(
@@ -463,7 +463,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                             # 设置总超时时间（180分钟）
                             timeout_seconds = timeout_minutes * 60
                             start_time = time.time()
-                            
+
                             for future in as_completed(futures, timeout=timeout_seconds):
                                 try:
                                     # 检查是否超过总时间限制
@@ -473,7 +473,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                                             if not f.done():
                                                 f.cancel()
                                         break
-                                        
+
                                     result = future.result(timeout=300)  # 单个任务5分钟超时
                                     pbar.update(result)
                                 except concurrent.futures.TimeoutError:
@@ -507,7 +507,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
             print("\n步骤 4/5: 删除关联文件...")
             # 检查全局超时
             check_global_timeout()
-            
+
             # 批量获取待删除的文件
             try:
                 files_to_delete = redis_conn.execute(
@@ -549,7 +549,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                             # 使用配置的超时时间
                             timeout_seconds = timeout_minutes * 60
                             start_time = time.time()
-                            
+
                             for future in as_completed(futures, timeout=timeout_seconds):
                                 try:
                                     # 检查是否超过总时间限制
@@ -559,7 +559,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                                             if not f.done():
                                                 f.cancel()
                                         break
-                                        
+
                                     result = future.result(timeout=300)  # 单个任务5分钟超时
                                     pbar.update(result)
                                 except concurrent.futures.TimeoutError:
@@ -593,7 +593,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
             print("\n步骤 5/5: 清理单独文件...")
             # 检查全局超时
             check_global_timeout()
-            
+
             try:
                 file_manager.get_single_files(start_datetime, end_datetime, redis_conn)
             except psycopg.Error as e:
@@ -626,7 +626,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                 except Exception as e:
                     print(f"删除单独文件批次时出错: {str(e)}")
                     raise  # 重新抛出异常，让主线程能够捕获
-                    
+
             try:
                 with tqdm(total=len(remaining_files), desc="删除单独文件") as pbar:
                     # 优化批处理大小
@@ -643,7 +643,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                             # 使用配置的超时时间
                             timeout_seconds = timeout_minutes * 60
                             start_time = time.time()
-                            
+
                             for future in as_completed(futures, timeout=timeout_seconds):
                                 try:
                                     # 检查是否超过总时间限制
@@ -653,7 +653,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                                             if not f.done():
                                                 f.cancel()
                                         break
-                                        
+
                                     result = future.result(timeout=300)  # 单个任务5分钟超时
                                     pbar.update(result)
                                 except concurrent.futures.TimeoutError:

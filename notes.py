@@ -32,65 +32,65 @@ class NoteManager:
         """
         start_id = generate_id(int(start_date.timestamp() * 1000))
         end_id = generate_id(int(end_date.timestamp() * 1000))
-        
+
         print(f"扫描Note范围: {start_id} 到 {end_id}")
-        
+
         # 首先获取总数估计
         try:
             self.db_cursor.execute(
                 """SELECT reltuples::bigint as estimate
-                FROM pg_class 
+                FROM pg_class
                 WHERE relname = 'note'""")
             result = self.db_cursor.fetchone()
             total_estimate = result["estimate"] if result else 0
             print(f"Note表估计总数: {total_estimate:,}")
         except Exception as e:
             print(f"获取表大小估计失败: {str(e)}")
-        
+
         all_notes = []
         last_id = start_id
         processed_count = 0
-        
+
         # 使用游标分页，避免OFFSET性能问题
         with tqdm(desc="收集Note ID", unit="个") as pbar:
             while True:
                 # 使用索引友好的范围查询
                 self.db_cursor.execute(
-                    """SELECT id FROM note 
-                    WHERE id > %s AND id < %s 
-                    ORDER BY id 
+                    """SELECT id FROM note
+                    WHERE id > %s AND id < %s
+                    ORDER BY id
                     LIMIT %s""",
                     [last_id, end_id, batch_size]
                 )
-                
+
                 results = self.db_cursor.fetchall()
                 if not results:
                     break
-                
+
                 batch_notes = [result["id"] for result in results]
                 all_notes.extend(batch_notes)
-                
+
                 # 更新进度
                 processed_count += len(batch_notes)
                 pbar.update(len(batch_notes))
                 pbar.set_postfix({'已收集': processed_count})
-                
+
                 # 更新last_id为当前批次的最后一个ID
                 last_id = batch_notes[-1]
-                
+
                 # 如果返回的结果少于batch_size，说明已经到达末尾
                 if len(batch_notes) < batch_size:
                     break
-        
+
         print(f"共收集到 {len(all_notes):,} 个Note ID")
-        
+
         # 添加调试信息：显示一些note ID样本
         if all_notes and self.verbose:
             print(f"Note ID样本: {all_notes[:5]}")
             # 检查ID长度和格式
             sample_id = all_notes[0]
             print(f"样本ID长度: {len(sample_id)}, 类型: {type(sample_id)}")
-        
+
         return all_notes
 
     def get_pinned_notes(self, note_ids):
@@ -106,7 +106,7 @@ class NoteManager:
 
         # 确保note_ids是列表类型
         note_ids = list(note_ids)
-        
+
         # 不使用预编译语句，直接使用参数化查询
         self.db_cursor.execute(
             """SELECT "noteId" FROM user_note_pining WHERE "noteId" = ANY(%s)""",
@@ -133,7 +133,7 @@ class NoteManager:
 
             # 确保 note_ids 是列表类型
             note_ids = list(note_ids)
-            
+
             # 添加调试信息：首先检查这些note是否存在
             if self.verbose:
                 self.db_cursor.execute(
@@ -141,7 +141,7 @@ class NoteManager:
                     [note_ids]
                 )
                 existing_notes = [row["id"] for row in self.db_cursor.fetchall()]
-                
+
                 if not existing_notes:
                     print(f"调试: 批次中没有找到任何note在数据库中 {note_ids[:3]}...")
                     # 做一个更具体的测试 - 检查第一个ID是否存在
@@ -149,7 +149,7 @@ class NoteManager:
                     self.db_cursor.execute("SELECT COUNT(*) as count FROM note WHERE id = %s", [test_id])
                     count_result = self.db_cursor.fetchone()
                     print(f"调试: 单独查询第一个ID '{test_id}' 的结果: {count_result['count'] if count_result else 'None'}")
-                    
+
                     # 检查数据库中实际存在的note样本
                     self.db_cursor.execute("SELECT id FROM note LIMIT 5")
                     sample_notes = self.db_cursor.fetchall()
@@ -292,12 +292,12 @@ class NoteManager:
             if note_ids:
                 print(f"输入的note ID样本: {note_ids[:3]}")
                 print(f"end_id: {end_id}")
-        
+
         # 获取所有相关note信息
         all_related_notes = {}
         to_process = set(note_ids)
         processed = set()
-        
+
         # 添加安全机制防止无限循环
         max_depth = 1000  # 最大递归深度
         current_depth = 0
@@ -306,9 +306,9 @@ class NoteManager:
             current_batch = list(to_process)[:batch_size]
             if self.verbose:
                 print(f"处理批次 {current_depth + 1}，批次大小: {len(current_batch)}")
-            
+
             notes_info = self.get_notes_batch(current_batch)
-            
+
             # 如果批次没有返回任何数据，避免无限循环
             if not notes_info:
                 print(f"警告: 批次 {current_batch[:5]}... 没有返回数据，跳过")
@@ -329,7 +329,7 @@ class NoteManager:
 
             to_process = to_process - processed
             current_depth += 1
-            
+
             # 每10次迭代检查一次进度（降低频率）
             if current_depth % 10 == 0 and self.verbose:
                 print(f"Note关联追踪深度: {current_depth}, 待处理: {len(to_process)}")
@@ -363,7 +363,7 @@ class NoteManager:
         max_pipeline_size = 1000
         user_id_list = list(all_user_ids)
         user_results = {}
-        
+
         # 分批处理用户ID，避免单次管道操作过大
         for i in range(0, len(user_id_list), max_pipeline_size):
             batch_user_ids = user_id_list[i:i + max_pipeline_size]
@@ -474,7 +474,7 @@ class NoteManager:
             # 检查游标状态，如果已关闭则重新创建
             if self.db_cursor.closed:
                 self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
-            
+
             self.db_cursor.execute(
                 """
                 SELECT EXISTS (
@@ -565,7 +565,7 @@ class NoteManager:
             local_related_notes = {}
             to_process = set(batch_ids)
             processed = set()
-            
+
             # 添加安全机制防止无限循环
             max_depth = 1000  # 最大递归深度
             current_depth = 0
@@ -573,7 +573,7 @@ class NoteManager:
             while to_process and current_depth < max_depth:
                 current_batch = list(to_process)[:batch_size]
                 notes_info = self.get_notes_batch(current_batch)
-                
+
                 # 如果批次没有返回任何数据，避免无限循环
                 if not notes_info:
                     print(f"警告: 批次 {current_batch[:5]}... 没有返回数据，跳过")
@@ -592,7 +592,7 @@ class NoteManager:
 
                 to_process = to_process - processed
                 current_depth += 1
-                
+
                 # 每100次迭代检查一次进度
                 if current_depth % 100 == 0 and self.verbose:
                     print(f"并行Note关联追踪深度: {current_depth}, 待处理: {len(to_process)}")
@@ -646,7 +646,7 @@ class NoteManager:
         max_pipeline_size = 1000
         user_id_list = list(self.all_user_ids)
         user_results = {}
-        
+
         # 分批处理用户ID，避免单次管道操作过大
         for i in range(0, len(user_id_list), max_pipeline_size):
             batch_user_ids = user_id_list[i:i + max_pipeline_size]

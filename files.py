@@ -1,6 +1,7 @@
 from aix import generate_id
 from connection import RedisConnection
 from tqdm import tqdm
+from psycopg.rows import dict_row
 
 class FileManager:
     """

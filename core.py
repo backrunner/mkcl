@@ -468,7 +468,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                                         print(f"小批次删除也失败: {str(small_e)}")
                                         continue
                             pbar.update(len(batch))
-                            
+
             except CleanupError:
                 raise
             except Exception as e:

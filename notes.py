@@ -35,7 +35,8 @@ class NoteManager:
         start_id = generate_id(int(start_date.timestamp() * 1000))
         end_id = generate_id(int(end_date.timestamp() * 1000))
 
-        print(f"扫描Note范围: {start_id} 到 {end_id}")
+        if self.verbose:
+            print(f"扫描Note范围: {start_id} 到 {end_id}")
 
         # 首先获取总数估计
         try:
@@ -45,9 +46,11 @@ class NoteManager:
                 WHERE relname = 'note'""")
             result = self.db_cursor.fetchone()
             total_estimate = result["estimate"] if result else 0
-            print(f"Note表估计总数: {total_estimate:,}")
+            if self.verbose:
+                print(f"Note表估计总数: {total_estimate:,}")
         except Exception as e:
-            print(f"获取表大小估计失败: {str(e)}")
+            if self.verbose:
+                print(f"获取表大小估计失败: {str(e)}")
 
         all_notes = []
         last_id = start_id
@@ -84,7 +87,8 @@ class NoteManager:
                 if len(batch_notes) < batch_size:
                     break
 
-        print(f"共收集到 {len(all_notes):,} 个Note ID")
+        if self.verbose:
+            print(f"共收集到 {len(all_notes):,} 个Note ID")
 
         # 添加调试信息：显示一些note ID样本
         if all_notes and self.verbose:
@@ -138,31 +142,72 @@ class NoteManager:
 
             # 添加调试信息：首先检查这些note是否存在
             if self.verbose:
-                self.db_cursor.execute(
-                    "SELECT id FROM note WHERE id = ANY(%s::text[])",
-                    [note_ids]
-                )
-                existing_notes = [row["id"] for row in self.db_cursor.fetchall()]
+                try:
+                    self.db_cursor.execute(
+                        "SELECT id FROM note WHERE id = ANY(%s::text[])",
+                        [note_ids]
+                    )
+                    
+                    # 检查查询是否成功执行
+                    if self.db_cursor.description is None:
+                        if self.verbose:
+                            print("调试: 初始查询未成功执行，尝试重新连接数据库")
+                        # 重新创建游标并重试
+                        self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
+                        self.db_cursor.execute(
+                            "SELECT id FROM note WHERE id = ANY(%s::text[])",
+                            [note_ids]
+                        )
+                    
+                    existing_notes = [row["id"] for row in self.db_cursor.fetchall()]
 
-                if not existing_notes:
-                    print(f"调试: 批次中没有找到任何note在数据库中 {note_ids[:3]}...")
-                    # 做一个更具体的测试 - 检查第一个ID是否存在
-                    test_id = note_ids[0]
-                    self.db_cursor.execute("SELECT COUNT(*) as count FROM note WHERE id = %s", [test_id])
-                    count_result = self.db_cursor.fetchone()
-                    print(f"调试: 单独查询第一个ID '{test_id}' 的结果: {count_result['count'] if count_result else 'None'}")
+                    if not existing_notes:
+                        if self.verbose:
+                            print(f"调试: 批次中没有找到任何note在数据库中 {note_ids[:3]}...")
+                        # 做一个更具体的测试 - 检查第一个ID是否存在
+                        test_id = note_ids[0]
+                        self.db_cursor.execute("SELECT COUNT(*) as count FROM note WHERE id = %s", [test_id])
+                        
+                        # 再次检查查询状态
+                        if self.db_cursor.description is None:
+                            if self.verbose:
+                                print("调试: 测试查询也失败，数据库连接可能有问题")
+                            return {}
+                            
+                        count_result = self.db_cursor.fetchone()
+                        if self.verbose:
+                            print(f"调试: 单独查询第一个ID '{test_id}' 的结果: {count_result['count'] if count_result else 'None'}")
 
-                    # 检查数据库中实际存在的note样本
-                    self.db_cursor.execute("SELECT id FROM note LIMIT 5")
-                    sample_notes = self.db_cursor.fetchall()
-                    if sample_notes:
-                        print(f"调试: 数据库中实际存在的note样本: {[row['id'] for row in sample_notes]}")
-                    else:
-                        print("调试: 数据库中没有找到任何note！")
-                    return {}
-                elif len(existing_notes) != len(note_ids):
-                    missing_notes = set(note_ids) - set(existing_notes)
-                    print(f"调试: 批次中有 {len(missing_notes)} 个note不存在，继续处理现有的 {len(existing_notes)} 个")
+                        # 检查数据库中实际存在的note样本
+                        self.db_cursor.execute("SELECT id FROM note LIMIT 5")
+                        if self.db_cursor.description is None:
+                            if self.verbose:
+                                print("调试: 样本查询失败")
+                            return {}
+                            
+                        sample_notes = self.db_cursor.fetchall()
+                        if sample_notes:
+                            if self.verbose:
+                                print(f"调试: 数据库中实际存在的note样本: {[row['id'] for row in sample_notes]}")
+                        else:
+                            if self.verbose:
+                                print("调试: 数据库中没有找到任何note！")
+                        return {}
+                    elif len(existing_notes) != len(note_ids):
+                        missing_notes = set(note_ids) - set(existing_notes)
+                        if self.verbose:
+                            print(f"调试: 批次中有 {len(missing_notes)} 个note不存在，继续处理现有的 {len(existing_notes)} 个")
+                        
+                except Exception as debug_e:
+                    if self.verbose:
+                        print(f"调试查询失败: {str(debug_e)}")
+                    # 尝试重新连接
+                    try:
+                        self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
+                    except Exception as reconnect_e:
+                        if self.verbose:
+                            print(f"重新连接失败: {str(reconnect_e)}")
+                        return {}
 
             # 当ID数量超过阈值时，使用临时表优化
             if len(note_ids) > 100:
@@ -313,7 +358,8 @@ class NoteManager:
 
             # 如果批次没有返回任何数据，避免无限循环
             if not notes_info:
-                print(f"警告: 批次 {current_batch[:5]}... 没有返回数据，跳过")
+                if self.verbose:
+                    print(f"警告: 批次 {current_batch[:5]}... 没有返回数据，跳过")
                 to_process = to_process - set(current_batch)
                 continue
 
@@ -337,7 +383,8 @@ class NoteManager:
                 print(f"Note关联追踪深度: {current_depth}, 待处理: {len(to_process)}")
 
         if current_depth >= max_depth:
-            print(f"警告: Note关联追踪达到最大深度限制 ({max_depth})，可能存在循环引用")
+            if self.verbose:
+                print(f"警告: Note关联追踪达到最大深度限制 ({max_depth})，可能存在循环引用")
 
         if self.verbose:
             print(f"关联分析完成，共收集到 {len(all_related_notes)} 个相关note")
@@ -380,7 +427,8 @@ class NoteManager:
                 user_results.update(dict(zip(batch_user_ids, batch_result_list)))
             except (ConnectionError, TimeoutError):
                 # 如果执行失败，重试当前批处理
-                print(f"Redis管道操作失败，重试批处理 (用户数: {len(batch_user_ids)})")
+                if self.verbose:
+                    print(f"Redis管道操作失败，重试批处理 (用户数: {len(batch_user_ids)})")
                 pipeline = redis_conn.pipeline()
                 for user_id in batch_user_ids:
                     pipeline.hget('user_cache', user_id)
@@ -388,7 +436,8 @@ class NoteManager:
                     batch_result_list = redis_conn.execute(lambda: pipeline.execute())
                     user_results.update(dict(zip(batch_user_ids, batch_result_list)))
                 except Exception as e:
-                    print(f"Redis管道重试也失败，跳过此批次: {str(e)}")
+                    if self.verbose:
+                        print(f"Redis管道重试也失败，跳过此批次: {str(e)}")
                     # 为失败的用户ID设置默认值
                     for user_id in batch_user_ids:
                         user_results[user_id] = None
@@ -526,7 +575,8 @@ class NoteManager:
             return safe_order, circular_deps
 
         except Exception as e:
-            print(f"分析note依赖关系失败: {str(e)}")
+            if self.verbose:
+                print(f"分析note依赖关系失败: {str(e)}")
             # 如果分析失败，返回原始列表
             return note_ids, []
 
@@ -570,7 +620,8 @@ class NoteManager:
                     result = self.db_cursor.fetchone()
                     note_history_exists = result["exists"] if result and "exists" in result else False
                 except Exception as e:
-                    print(f"检查note_history表存在性失败: {str(e)}")
+                    if self.verbose:
+                        print(f"检查note_history表存在性失败: {str(e)}")
                     note_history_exists = False
 
                 # 步骤1: 删除note_history表中的关联记录（如果存在）
@@ -584,7 +635,7 @@ class NoteManager:
 
                 # 步骤2: 分析note依赖关系
                 safe_order, circular_deps = self._analyze_note_dependencies(note_ids)
-
+                
                 if self.verbose:
                     print(f"依赖分析结果: 安全删除{len(safe_order)}个, 循环依赖{len(circular_deps)}个")
 
@@ -599,13 +650,14 @@ class NoteManager:
 
                 # 步骤4: 处理循环依赖的note
                 if circular_deps:
-                    print(f"处理{len(circular_deps)}个有循环依赖的note")
+                    if self.verbose:
+                        print(f"处理{len(circular_deps)}个有循环依赖的note")
                     # 使用更小的批次和逐个删除策略
                     small_batch_size = min(10, batch_size // 100)
-
+                    
                     for i in range(0, len(circular_deps), small_batch_size):
                         batch = circular_deps[i:i + small_batch_size]
-
+                        
                         # 首先尝试批量删除
                         try:
                             self.db_cursor.execute(
@@ -627,33 +679,37 @@ class NoteManager:
 
                 # 提交事务
                 self.db_conn.commit()
-                print(f"成功删除note批次，共{len(note_ids)}个")
+                if self.verbose:
+                    print(f"成功删除note批次，共{len(note_ids)}个")
                 break  # 成功完成，退出重试循环
-
+                
             except psycopg.errors.DeadlockDetected as e:
                 # 死锁检测，回滚并重试
                 try:
                     self.db_conn.rollback()
                 except Exception:
                     pass
-
+                
                 if retry_count < max_retries - 1:
                     # 指数退避延迟
                     delay = base_delay * (2 ** retry_count)
-                    print(f"检测到死锁，{delay:.2f}秒后重试 ({retry_count + 1}/{max_retries})")
+                    if self.verbose:
+                        print(f"检测到死锁，{delay:.2f}秒后重试 ({retry_count + 1}/{max_retries})")
                     time.sleep(delay)
-
+                    
                     # 重新创建游标
                     try:
                         self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
                     except Exception:
                         pass
                 else:
-                    print(f"删除note记录失败，已达最大重试次数: {str(e)}")
+                    if self.verbose:
+                        print(f"删除note记录失败，已达最大重试次数: {str(e)}")
                     raise
-
+                    
             except Exception as e:
-                print(f"删除note记录失败: {str(e)}")
+                if self.verbose:
+                    print(f"删除note记录失败: {str(e)}")
                 try:
                     self.db_conn.rollback()
                     self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
@@ -708,7 +764,8 @@ class NoteManager:
 
                 # 如果批次没有返回任何数据，避免无限循环
                 if not notes_info:
-                    print(f"警告: 批次 {current_batch[:5]}... 没有返回数据，跳过")
+                    if self.verbose:
+                        print(f"警告: 批次 {current_batch[:5]}... 没有返回数据，跳过")
                     to_process = to_process - set(current_batch)
                     continue
 
@@ -730,7 +787,8 @@ class NoteManager:
                     print(f"并行Note关联追踪深度: {current_depth}, 待处理: {len(to_process)}")
 
             if current_depth >= max_depth:
-                print(f"警告: 并行Note关联追踪达到最大深度限制 ({max_depth})，可能存在循环引用")
+                if self.verbose:
+                    print(f"警告: 并行Note关联追踪达到最大深度限制 ({max_depth})，可能存在循环引用")
 
             # 分析处理结果
             local_notes_to_delete = set()
@@ -793,7 +851,8 @@ class NoteManager:
                 user_results.update(dict(zip(batch_user_ids, batch_result_list)))
             except (ConnectionError, TimeoutError):
                 # 如果执行失败，重试当前批处理
-                print(f"Redis管道操作失败，重试批处理 (用户数: {len(batch_user_ids)})")
+                if self.verbose:
+                    print(f"Redis管道操作失败，重试批处理 (用户数: {len(batch_user_ids)})")
                 pipeline = redis_conn.pipeline()
                 for user_id in batch_user_ids:
                     pipeline.hget('user_cache', user_id)
@@ -801,7 +860,8 @@ class NoteManager:
                     batch_result_list = redis_conn.execute(lambda: pipeline.execute())
                     user_results.update(dict(zip(batch_user_ids, batch_result_list)))
                 except Exception as e:
-                    print(f"Redis管道重试也失败，跳过此批次: {str(e)}")
+                    if self.verbose:
+                        print(f"Redis管道重试也失败，跳过此批次: {str(e)}")
                     # 为失败的用户ID设置默认值
                     for user_id in batch_user_ids:
                         user_results[user_id] = None
@@ -918,7 +978,8 @@ class NoteManager:
                     result = self.db_cursor.fetchone()
                     note_history_exists = result["exists"] if result and "exists" in result else False
                 except Exception as e:
-                    print(f"检查note_history表存在性失败: {str(e)}")
+                    if self.verbose:
+                        print(f"检查note_history表存在性失败: {str(e)}")
                     try:
                         self.db_conn.rollback()
                         self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
@@ -940,7 +1001,8 @@ class NoteManager:
                                 [batch]
                             )
                     except Exception as e:
-                        print(f"删除note_history记录失败: {str(e)}")
+                        if self.verbose:
+                            print(f"删除note_history记录失败: {str(e)}")
                         self.db_conn.rollback()
                         raise
 
@@ -1015,7 +1077,8 @@ class NoteManager:
                 if retry_count < max_retries - 1:
                     # 指数退避延迟
                     delay = base_delay * (2 ** retry_count) + (retry_count * 0.05)
-                    print(f"检测到死锁，{delay:.2f}秒后重试 ({retry_count + 1}/{max_retries})")
+                    if self.verbose:
+                        print(f"检测到死锁，{delay:.2f}秒后重试 ({retry_count + 1}/{max_retries})")
                     time.sleep(delay)
 
                     # 重新创建游标
@@ -1024,11 +1087,13 @@ class NoteManager:
                     except Exception:
                         pass
                 else:
-                    print(f"删除note记录失败，已达最大重试次数: {str(e)}")
+                    if self.verbose:
+                        print(f"删除note记录失败，已达最大重试次数: {str(e)}")
                     raise
 
             except Exception as e:
-                print(f"删除note记录失败: {str(e)}")
+                if self.verbose:
+                    print(f"删除note记录失败: {str(e)}")
                 try:
                     self.db_conn.rollback()
                     self.db_cursor = self.db_conn.cursor(row_factory=dict_row)

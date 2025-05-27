@@ -167,6 +167,10 @@ class DatabaseConnection:
             try:
                 # 添加超时控制，防止无限等待
                 conn = self.pool.getconn(timeout=10.0)
+                
+                # 记录连接来源池的信息，用于正确返回
+                original_pool = self.pool
+                
                 yield conn
                 break
             except (psycopg.OperationalError, psycopg_pool.PoolTimeout) as e:
@@ -187,14 +191,37 @@ class DatabaseConnection:
                 print(f"意外的数据库错误: {str(e)}")
                 if conn:
                     try:
-                        self.pool.putconn(conn)
-                    except:
-                        pass
-                raise
-            finally:
-                # 确保连接始终返回到池中
-                if conn:
-                    try:
-                        self.pool.putconn(conn)
+                        # 确保连接返回到正确的池
+                        if hasattr(locals(), 'original_pool') and original_pool:
+                            original_pool.putconn(conn)
+                        else:
+                            self.pool.putconn(conn)
                     except Exception as put_error:
                         print(f"返回连接到池时出错: {str(put_error)}")
+                        # 如果返回连接失败，关闭连接避免泄漏
+                        try:
+                            conn.close()
+                        except:
+                            pass
+                raise
+            finally:
+                # 确保连接始终返回到正确的池中
+                if conn:
+                    try:
+                        # 检查连接状态，只有正常状态的连接才返回池中
+                        if conn.closed == 0:  # 0表示连接正常
+                            if hasattr(locals(), 'original_pool') and original_pool:
+                                original_pool.putconn(conn)
+                            else:
+                                self.pool.putconn(conn)
+                        else:
+                            # 连接已关闭，直接丢弃
+                            print("连接已关闭，不返回到池中")
+                    except Exception as put_error:
+                        print(f"返回连接到池时出错: {str(put_error)}")
+                        # 如果返回连接失败，尝试关闭连接
+                        try:
+                            if not conn.closed:
+                                conn.close()
+                        except:
+                            pass

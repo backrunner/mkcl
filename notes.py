@@ -7,6 +7,8 @@ from multiprocessing import cpu_count
 from psycopg.rows import dict_row
 from psycopg import sql
 from tqdm import tqdm
+import psycopg
+import time
 
 class NoteManager:
     """
@@ -459,81 +461,164 @@ class NoteManager:
 
     def delete_notes_batch(self, note_ids: list[str], batch_size: int = 1000) -> None:
         """
-        批量删除note及其相关历史记录，采用分批处理方式
+        批量删除note及其相关历史记录，采用分批处理方式，增加死锁重试机制
         Args:
             note_ids: 要删除的noteID列表
+            batch_size: 批处理大小，默认1000
         """
         if not note_ids:
             return
 
         # 确保note_ids是列表类型
         note_ids = list(note_ids)
-
-        # 先检查note_history表是否存在，添加安全检查
-        try:
-            # 检查游标状态，如果已关闭则重新创建
-            if self.db_cursor.closed:
-                self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
-
-            self.db_cursor.execute(
-                """
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables
-                    WHERE table_schema = 'public'
-                    AND table_name = 'note_history'
-                )
-                """
-            )
-            result = self.db_cursor.fetchone()
-            # 安全检查：确保查询返回了结果
-            note_history_exists = result["exists"] if result and "exists" in result else False
-        except Exception as e:
-            print(f"检查note_history表存在性失败: {str(e)}")
-            # 回滚事务并重新创建游标
+        
+        # 死锁重试配置
+        max_retries = 5
+        base_delay = 0.1  # 基础延迟100ms
+        
+        for retry_count in range(max_retries):
             try:
-                self.db_conn.rollback()
-                self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
-            except Exception:
-                pass
-            # 默认假设表不存在，避免程序崩溃
-            note_history_exists = False
+                # 检查游标状态，如果已关闭则重新创建
+                if self.db_cursor.closed:
+                    self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
 
-        # 如果note_history表存在，先删除note_history表中的关联记录
-        if note_history_exists:
-            try:
-                # 不使用预编译语句，直接使用参数化查询
-                self.db_cursor.execute(
-                    """DELETE FROM note_history nh
-                       WHERE nh."targetId" = ANY(%s)""",
-                    [note_ids]
-                )
+                # 先检查note_history表是否存在，添加安全检查
+                try:
+                    self.db_cursor.execute(
+                        """
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables
+                            WHERE table_schema = 'public'
+                            AND table_name = 'note_history'
+                        )
+                        """
+                    )
+                    result = self.db_cursor.fetchone()
+                    note_history_exists = result["exists"] if result and "exists" in result else False
+                except Exception as e:
+                    print(f"检查note_history表存在性失败: {str(e)}")
+                    try:
+                        self.db_conn.rollback()
+                        self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
+                    except Exception:
+                        pass
+                    note_history_exists = False
+
+                # 开始事务
+                self.db_conn.autocommit = False
+                
+                # 如果note_history表存在，先删除note_history表中的关联记录
+                if note_history_exists:
+                    try:
+                        # 分批删除note_history记录，避免长时间锁定
+                        for i in range(0, len(note_ids), batch_size):
+                            batch = note_ids[i:i + batch_size]
+                            self.db_cursor.execute(
+                                """DELETE FROM note_history WHERE "targetId" = ANY(%s)""",
+                                [batch]
+                            )
+                    except Exception as e:
+                        print(f"删除note_history记录失败: {str(e)}")
+                        self.db_conn.rollback()
+                        raise
+
+                # 分批删除note记录，使用更小的批次避免长时间锁定
+                smaller_batch_size = min(batch_size // 4, 250)  # 使用更小的批次
+                
+                for i in range(0, len(note_ids), smaller_batch_size):
+                    batch = note_ids[i:i + smaller_batch_size]
+                    
+                    # 使用更安全的删除方式，避免外键约束冲突
+                    # 先删除作为回复的note（没有被其他note引用的）
+                    self.db_cursor.execute(
+                        """DELETE FROM note 
+                           WHERE id = ANY(%s) 
+                           AND id NOT IN (
+                               SELECT DISTINCT "replyId" FROM note 
+                               WHERE "replyId" IS NOT NULL 
+                               AND "replyId" = ANY(%s)
+                           )
+                           AND id NOT IN (
+                               SELECT DISTINCT "renoteId" FROM note 
+                               WHERE "renoteId" IS NOT NULL 
+                               AND "renoteId" = ANY(%s)
+                           )""",
+                        [batch, batch, batch]
+                    )
+                
+                # 处理剩余的有外键引用的note
+                # 多次尝试删除，直到没有更多可删除的记录
+                remaining_attempts = 5
+                while remaining_attempts > 0:
+                    self.db_cursor.execute(
+                        """WITH deletable_notes AS (
+                               SELECT id FROM note 
+                               WHERE id = ANY(%s)
+                               AND id NOT IN (
+                                   SELECT DISTINCT "replyId" FROM note 
+                                   WHERE "replyId" IS NOT NULL 
+                                   AND "replyId" = ANY(%s)
+                                   AND "replyId" != id
+                               )
+                               AND id NOT IN (
+                                   SELECT DISTINCT "renoteId" FROM note 
+                                   WHERE "renoteId" IS NOT NULL 
+                                   AND "renoteId" = ANY(%s)
+                                   AND "renoteId" != id
+                               )
+                               LIMIT 100
+                           )
+                           DELETE FROM note 
+                           WHERE id IN (SELECT id FROM deletable_notes)""",
+                        [note_ids, note_ids, note_ids]
+                    )
+                    
+                    if self.db_cursor.rowcount == 0:
+                        break
+                    remaining_attempts -= 1
+
+                # 提交事务
+                self.db_conn.commit()
+                
+                # 成功完成，退出重试循环
+                break
+                
+            except psycopg.errors.DeadlockDetected as e:
+                # 死锁检测，回滚并重试
+                try:
+                    self.db_conn.rollback()
+                except Exception:
+                    pass
+                
+                if retry_count < max_retries - 1:
+                    # 指数退避延迟
+                    delay = base_delay * (2 ** retry_count) + (retry_count * 0.05)
+                    print(f"检测到死锁，{delay:.2f}秒后重试 ({retry_count + 1}/{max_retries})")
+                    time.sleep(delay)
+                    
+                    # 重新创建游标
+                    try:
+                        self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
+                    except Exception:
+                        pass
+                else:
+                    print(f"删除note记录失败，已达最大重试次数: {str(e)}")
+                    raise
+                    
             except Exception as e:
-                print(f"删除note_history记录失败: {str(e)}")
-                # 回滚事务并重新创建游标
+                print(f"删除note记录失败: {str(e)}")
                 try:
                     self.db_conn.rollback()
                     self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
                 except Exception:
                     pass
-                # 继续执行，不中断整个删除流程
-
-        # 再删除note表中的记录
-        try:
-            self.db_cursor.execute(
-                """DELETE FROM note WHERE id = ANY(%s)""",
-                [note_ids]
-            )
-            self.db_conn.commit()
-        except Exception as e:
-            print(f"删除note记录失败: {str(e)}")
-            # 回滚事务
-            try:
-                self.db_conn.rollback()
-                self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
-            except Exception:
-                pass
-            # 重新抛出异常，让上层处理
-            raise
+                raise
+            finally:
+                # 确保恢复autocommit模式
+                try:
+                    self.db_conn.autocommit = True
+                except Exception:
+                    pass
 
     def analyze_notes_batch_parallel(self, note_ids: List[str], end_id: str,
                                    redis_conn: RedisConnection, file_manager,

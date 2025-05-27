@@ -431,73 +431,44 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                 error_details = traceback.format_exc()
                 raise RedisError("获取待删除note列表失败", "步骤3:删除note", error_details)
 
-            # 使用多线程并行删除note
-            max_workers = min(cpu_count(), 8)  # 限制最大工作线程数，避免过多线程
-
-            def delete_notes_batch_parallel(batch):
-                # 每个线程使用独立的数据库连接，避免并发问题
-                thread_db_conn = None
-                try:
-                    with db.get_connection() as thread_db_conn:
-                        thread_note_manager = NoteManager(thread_db_conn)
-                        thread_note_manager.delete_notes_batch(batch)
-                        return len(batch)
-                except Exception as e:
-                    print(f"删除note批次时出错 (batch_size: {len(batch)}): {str(e)}")
-                    raise  # 重新抛出异常，让主线程能够捕获
-
+            # 改为单线程删除，避免死锁问题
+            print(f"准备删除 {len(notes_to_delete)} 个note（使用单线程模式避免死锁）")
+            
             try:
                 with tqdm(total=len(notes_to_delete), desc="删除note") as pbar:
-                    # 优化批处理大小，可根据实际情况调整
-                    optimized_batch_size = min(batch_size * 2, 500)  # 增大删除操作的批处理大小
+                    # 使用较大的批处理大小，但单线程执行
+                    optimized_batch_size = 500
                     note_batches = [list(notes_to_delete)[i:i+optimized_batch_size]
                                 for i in range(0, len(notes_to_delete), optimized_batch_size)]
 
-                    try:
-                        # 添加超时控制
-                        import concurrent.futures
-                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                            futures = {executor.submit(delete_notes_batch_parallel, batch): batch
-                                    for batch in note_batches}
-
-                            # 设置总超时时间（180分钟）
-                            timeout_seconds = timeout_minutes * 60
-                            start_time = time.time()
-
-                            for future in as_completed(futures, timeout=timeout_seconds):
-                                try:
-                                    # 检查是否超过总时间限制
-                                    if time.time() - start_time > timeout_seconds:
-                                        print("操作超时，取消剩余任务")
-                                        for f in futures:
-                                            if not f.done():
-                                                f.cancel()
-                                        break
-
-                                    result = future.result(timeout=300)  # 单个任务5分钟超时
-                                    pbar.update(result)
-                                except concurrent.futures.TimeoutError:
-                                    print(f"删除note任务超时，取消剩余任务")
-                                    for f in futures:
-                                        if not f.done():
-                                            f.cancel()
-                                    raise NoteDeletionError("删除note操作超时", "步骤3:删除note", "任务执行时间过长")
-                                except Exception as e:
-                                    # 取消所有未完成的任务
-                                    for f in futures:
-                                        if not f.done():
-                                            f.cancel()
-                                    # 终止整个流程
-                                    error_details = traceback.format_exc()
-                                    if isinstance(e, psycopg.Error):
-                                        raise DatabaseError(f"删除note过程中数据库错误: {str(e)}", "步骤3:删除note", error_details)
-                                    else:
-                                        raise NoteDeletionError(f"删除note过程中发生错误: {str(e)}", "步骤3:删除note", error_details)
-                    except Exception as e:
-                        if not isinstance(e, CleanupError):
-                            error_details = traceback.format_exc()
-                            raise NoteDeletionError(f"删除note过程失败: {str(e)}", "步骤3:删除note", error_details)
-                        raise
+                    for batch in note_batches:
+                        try:
+                            # 检查全局超时
+                            check_global_timeout()
+                            
+                            # 使用主连接删除，避免连接池问题
+                            note_manager.delete_notes_batch(batch)
+                            pbar.update(len(batch))
+                            
+                        except psycopg.errors.DeadlockDetected as e:
+                            print(f"删除note批次时检测到死锁，跳过此批次: {str(e)}")
+                            # 记录失败的批次，但继续处理其他批次
+                            pbar.update(len(batch))
+                            continue
+                        except Exception as e:
+                            print(f"删除note批次时出错 (batch_size: {len(batch)}): {str(e)}")
+                            # 尝试更小的批次
+                            if len(batch) > 50:
+                                print(f"尝试使用更小的批次重新删除...")
+                                smaller_batches = [batch[i:i+50] for i in range(0, len(batch), 50)]
+                                for small_batch in smaller_batches:
+                                    try:
+                                        note_manager.delete_notes_batch(small_batch)
+                                    except Exception as small_e:
+                                        print(f"小批次删除也失败: {str(small_e)}")
+                                        continue
+                            pbar.update(len(batch))
+                            
             except CleanupError:
                 raise
             except Exception as e:
@@ -542,7 +513,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                     try:
                         # 添加超时控制
                         import concurrent.futures
-                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        with ThreadPoolExecutor(max_workers=min(cpu_count(), 8)) as executor:
                             futures = {executor.submit(delete_files_batch_parallel, batch): batch
                                     for batch in file_batches}
 
@@ -636,7 +607,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
 
                     try:
                         # 添加超时控制
-                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        with ThreadPoolExecutor(max_workers=min(cpu_count(), 8)) as executor:
                             futures = {executor.submit(delete_remaining_files_batch_parallel, batch): batch
                                     for batch in remaining_batches}
 

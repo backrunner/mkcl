@@ -199,22 +199,40 @@ class NoteManager:
         all_related_notes = {}
         to_process = set(note_ids)
         processed = set()
+        
+        # 添加安全机制防止无限循环
+        max_depth = 1000  # 最大递归深度
+        current_depth = 0
 
-        while to_process:
+        while to_process and current_depth < max_depth:
             current_batch = list(to_process)[:batch_size]
             notes_info = self.get_notes_batch(current_batch)
+            
+            # 如果批次没有返回任何数据，避免无限循环
+            if not notes_info:
+                print(f"警告: 批次 {current_batch[:5]}... 没有返回数据，跳过")
+                to_process = to_process - set(current_batch)
+                continue
 
             for note_id, info in notes_info.items():
                 all_related_notes[note_id] = info
                 processed.add(note_id)
 
-                # 添加关联note到处理队列
-                if info["renoteId"] and info["renoteId"] not in processed:
+                # 添加关联note到处理队列，增加安全检查
+                if info.get("renoteId") and info["renoteId"] not in processed and info["renoteId"] not in to_process:
                     to_process.add(info["renoteId"])
-                if info["replyId"] and info["replyId"] not in processed:
+                if info.get("replyId") and info["replyId"] not in processed and info["replyId"] not in to_process:
                     to_process.add(info["replyId"])
 
             to_process = to_process - processed
+            current_depth += 1
+            
+            # 每100次迭代检查一次进度
+            if current_depth % 100 == 0:
+                print(f"Note关联追踪深度: {current_depth}, 待处理: {len(to_process)}")
+
+        if current_depth >= max_depth:
+            print(f"警告: Note关联追踪达到最大深度限制 ({max_depth})，可能存在循环引用")
 
         # 分析处理结果
         notes_to_delete = set()
@@ -235,23 +253,37 @@ class NoteManager:
             all_user_ids.add(note_info["userId"])
 
         # 批量检查用户状态
-        pipeline = redis_conn.pipeline()
-        for user_id in all_user_ids:
-            pipeline.hget('user_cache', user_id)
-
-        try:
-            # 执行Redis管道命令
-            user_results = dict(zip(all_user_ids, redis_conn.execute(
-                lambda: pipeline.execute()
-            )))
-        except (ConnectionError, TimeoutError):
-            # 如果执行失败，重试整个批处理
+        # 限制单次管道操作的大小，防止Redis超时
+        max_pipeline_size = 1000
+        user_id_list = list(all_user_ids)
+        user_results = {}
+        
+        # 分批处理用户ID，避免单次管道操作过大
+        for i in range(0, len(user_id_list), max_pipeline_size):
+            batch_user_ids = user_id_list[i:i + max_pipeline_size]
             pipeline = redis_conn.pipeline()
-            for user_id in all_user_ids:
+            for user_id in batch_user_ids:
                 pipeline.hget('user_cache', user_id)
-            user_results = dict(zip(all_user_ids, redis_conn.execute(
-                lambda: pipeline.execute()
-            )))
+
+            try:
+                # 批量执行Redis命令
+                batch_result_list = redis_conn.execute(lambda: pipeline.execute())
+                # 合并结果
+                user_results.update(dict(zip(batch_user_ids, batch_result_list)))
+            except (ConnectionError, TimeoutError):
+                # 如果执行失败，重试当前批处理
+                print(f"Redis管道操作失败，重试批处理 (用户数: {len(batch_user_ids)})")
+                pipeline = redis_conn.pipeline()
+                for user_id in batch_user_ids:
+                    pipeline.hget('user_cache', user_id)
+                try:
+                    batch_result_list = redis_conn.execute(lambda: pipeline.execute())
+                    user_results.update(dict(zip(batch_user_ids, batch_result_list)))
+                except Exception as e:
+                    print(f"Redis管道重试也失败，跳过此批次: {str(e)}")
+                    # 为失败的用户ID设置默认值
+                    for user_id in batch_user_ids:
+                        user_results[user_id] = None
 
         # 处理未缓存的用户
         uncached_users = {
@@ -427,22 +459,40 @@ class NoteManager:
             local_related_notes = {}
             to_process = set(batch_ids)
             processed = set()
+            
+            # 添加安全机制防止无限循环
+            max_depth = 1000  # 最大递归深度
+            current_depth = 0
 
-            while to_process:
+            while to_process and current_depth < max_depth:
                 current_batch = list(to_process)[:batch_size]
                 notes_info = self.get_notes_batch(current_batch)
+                
+                # 如果批次没有返回任何数据，避免无限循环
+                if not notes_info:
+                    print(f"警告: 批次 {current_batch[:5]}... 没有返回数据，跳过")
+                    to_process = to_process - set(current_batch)
+                    continue
 
                 for note_id, info in notes_info.items():
                     local_related_notes[note_id] = info
                     processed.add(note_id)
 
                     # 安全地检查和添加关联note
-                    if info.get("renoteId") and info["renoteId"] not in processed:
+                    if info.get("renoteId") and info["renoteId"] not in processed and info["renoteId"] not in to_process:
                         to_process.add(info["renoteId"])
-                    if info.get("replyId") and info["replyId"] not in processed:
+                    if info.get("replyId") and info["replyId"] not in processed and info["replyId"] not in to_process:
                         to_process.add(info["replyId"])
 
                 to_process = to_process - processed
+                current_depth += 1
+                
+                # 每100次迭代检查一次进度
+                if current_depth % 100 == 0:
+                    print(f"并行Note关联追踪深度: {current_depth}, 待处理: {len(to_process)}")
+
+            if current_depth >= max_depth:
+                print(f"警告: 并行Note关联追踪达到最大深度限制 ({max_depth})，可能存在循环引用")
 
             # 分析处理结果
             local_notes_to_delete = set()
@@ -486,20 +536,37 @@ class NoteManager:
                 total_deleted += future.result()
 
         # 批量获取用户状态
-        pipeline = redis_conn.pipeline()
-        for user_id in self.all_user_ids:
-            pipeline.hget('user_cache', user_id)
-
-        try:
-            # 批量执行Redis命令
-            user_result_list = redis_conn.execute(lambda: pipeline.execute())
-            user_results = dict(zip(self.all_user_ids, user_result_list))
-        except (ConnectionError, TimeoutError):
+        # 限制单次管道操作的大小，防止Redis超时
+        max_pipeline_size = 1000
+        user_id_list = list(self.all_user_ids)
+        user_results = {}
+        
+        # 分批处理用户ID，避免单次管道操作过大
+        for i in range(0, len(user_id_list), max_pipeline_size):
+            batch_user_ids = user_id_list[i:i + max_pipeline_size]
             pipeline = redis_conn.pipeline()
-            for user_id in self.all_user_ids:
+            for user_id in batch_user_ids:
                 pipeline.hget('user_cache', user_id)
-            user_result_list = redis_conn.execute(lambda: pipeline.execute())
-            user_results = dict(zip(self.all_user_ids, user_result_list))
+
+            try:
+                # 批量执行Redis命令
+                batch_result_list = redis_conn.execute(lambda: pipeline.execute())
+                # 合并结果
+                user_results.update(dict(zip(batch_user_ids, batch_result_list)))
+            except (ConnectionError, TimeoutError):
+                # 如果执行失败，重试当前批处理
+                print(f"Redis管道操作失败，重试批处理 (用户数: {len(batch_user_ids)})")
+                pipeline = redis_conn.pipeline()
+                for user_id in batch_user_ids:
+                    pipeline.hget('user_cache', user_id)
+                try:
+                    batch_result_list = redis_conn.execute(lambda: pipeline.execute())
+                    user_results.update(dict(zip(batch_user_ids, batch_result_list)))
+                except Exception as e:
+                    print(f"Redis管道重试也失败，跳过此批次: {str(e)}")
+                    # 为失败的用户ID设置默认值
+                    for user_id in batch_user_ids:
+                        user_results[user_id] = None
 
         # 处理未缓存的用户
         uncached_users = {

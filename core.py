@@ -7,10 +7,10 @@ from tqdm import tqdm
 from connection import RedisConnection, DatabaseConnection
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import cpu_count
-from typing import Dict, Any, Tuple
 import traceback
 import psycopg
 from redis.exceptions import ConnectionError, TimeoutError
+import time
 
 class CleanupError(Exception):
     """清理过程中的错误基类"""
@@ -36,8 +36,19 @@ class FileDeletionError(CleanupError):
     """文件删除错误"""
     pass
 
-def clean_data(db_info, redis_info, start_date, end_date):
+def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180):
     print("开始数据清理流程...")
+    print(f"配置超时时间: {timeout_minutes} 分钟")
+    
+    # 全局超时控制
+    global_start_time = time.time()
+    global_timeout_seconds = timeout_minutes * 60
+    
+    def check_global_timeout():
+        """检查是否超过全局超时时间"""
+        if time.time() - global_start_time > global_timeout_seconds:
+            raise CleanupError(f"全局操作超时 ({timeout_minutes} 分钟)", "全局超时检查", 
+                             f"运行时间已超过 {timeout_minutes} 分钟")
 
     # 使用新的 Redis 连接管理器
     redis_conn = RedisConnection(redis_info)
@@ -107,6 +118,9 @@ def clean_data(db_info, redis_info, start_date, end_date):
             try:
                 with tqdm(total=len(notes_to_process), desc="分析note") as pbar:
                     while notes_to_process:
+                        # 检查全局超时
+                        check_global_timeout()
+                        
                         current_batch = notes_to_process[:batch_size]
                         notes_to_process = notes_to_process[batch_size:]
 
@@ -132,6 +146,9 @@ def clean_data(db_info, redis_info, start_date, end_date):
                 raise CleanupError(f"分析note失败: {str(e)}", "步骤2:分析note", error_details)
 
             print("\n步骤 3/5: 删除note...")
+            # 检查全局超时
+            check_global_timeout()
+            
             # 批量获取待删除的notes
             try:
                 notes_to_delete = redis_conn.execute(
@@ -149,13 +166,14 @@ def clean_data(db_info, redis_info, start_date, end_date):
 
             def delete_notes_batch_parallel(batch):
                 # 每个线程使用独立的数据库连接，避免并发问题
+                thread_db_conn = None
                 try:
                     with db.get_connection() as thread_db_conn:
                         thread_note_manager = NoteManager(thread_db_conn)
                         thread_note_manager.delete_notes_batch(batch)
                         return len(batch)
                 except Exception as e:
-                    print(f"删除note批次时出错: {str(e)}")
+                    print(f"删除note批次时出错 (batch_size: {len(batch)}): {str(e)}")
                     raise  # 重新抛出异常，让主线程能够捕获
 
             try:
@@ -166,13 +184,34 @@ def clean_data(db_info, redis_info, start_date, end_date):
                                 for i in range(0, len(notes_to_delete), optimized_batch_size)]
 
                     try:
+                        # 添加超时控制
+                        import concurrent.futures
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = {executor.submit(delete_notes_batch_parallel, batch): batch
                                     for batch in note_batches}
 
-                            for future in as_completed(futures):
+                            # 设置总超时时间（180分钟）
+                            timeout_seconds = timeout_minutes * 60
+                            start_time = time.time()
+                            
+                            for future in as_completed(futures, timeout=timeout_seconds):
                                 try:
-                                    pbar.update(future.result())
+                                    # 检查是否超过总时间限制
+                                    if time.time() - start_time > timeout_seconds:
+                                        print("操作超时，取消剩余任务")
+                                        for f in futures:
+                                            if not f.done():
+                                                f.cancel()
+                                        break
+                                        
+                                    result = future.result(timeout=300)  # 单个任务5分钟超时
+                                    pbar.update(result)
+                                except concurrent.futures.TimeoutError:
+                                    print(f"删除note任务超时，取消剩余任务")
+                                    for f in futures:
+                                        if not f.done():
+                                            f.cancel()
+                                    raise NoteDeletionError("删除note操作超时", "步骤3:删除note", "任务执行时间过长")
                                 except Exception as e:
                                     # 取消所有未完成的任务
                                     for f in futures:
@@ -196,6 +235,9 @@ def clean_data(db_info, redis_info, start_date, end_date):
                 raise NoteDeletionError(f"删除note阶段失败: {str(e)}", "步骤3:删除note", error_details)
 
             print("\n步骤 4/5: 删除关联文件...")
+            # 检查全局超时
+            check_global_timeout()
+            
             # 批量获取待删除的文件
             try:
                 files_to_delete = redis_conn.execute(
@@ -228,13 +270,34 @@ def clean_data(db_info, redis_info, start_date, end_date):
                                 for i in range(0, len(files_to_delete), optimized_batch_size)]
 
                     try:
+                        # 添加超时控制
+                        import concurrent.futures
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = {executor.submit(delete_files_batch_parallel, batch): batch
                                     for batch in file_batches}
 
-                            for future in as_completed(futures):
+                            # 使用配置的超时时间
+                            timeout_seconds = timeout_minutes * 60
+                            start_time = time.time()
+                            
+                            for future in as_completed(futures, timeout=timeout_seconds):
                                 try:
-                                    pbar.update(future.result())
+                                    # 检查是否超过总时间限制
+                                    if time.time() - start_time > timeout_seconds:
+                                        print("删除文件操作超时，取消剩余任务")
+                                        for f in futures:
+                                            if not f.done():
+                                                f.cancel()
+                                        break
+                                        
+                                    result = future.result(timeout=300)  # 单个任务5分钟超时
+                                    pbar.update(result)
+                                except concurrent.futures.TimeoutError:
+                                    print(f"删除文件任务超时，取消剩余任务")
+                                    for f in futures:
+                                        if not f.done():
+                                            f.cancel()
+                                    raise FileDeletionError("删除文件操作超时", "步骤4:删除关联文件", "任务执行时间过长")
                                 except Exception as e:
                                     # 取消所有未完成的任务
                                     for f in futures:
@@ -258,6 +321,9 @@ def clean_data(db_info, redis_info, start_date, end_date):
                 raise FileDeletionError(f"删除关联文件阶段失败: {str(e)}", "步骤4:删除关联文件", error_details)
 
             print("\n步骤 5/5: 清理单独文件...")
+            # 检查全局超时
+            check_global_timeout()
+            
             try:
                 file_manager.get_single_files(start_datetime, end_datetime, redis_conn)
             except psycopg.Error as e:
@@ -299,13 +365,33 @@ def clean_data(db_info, redis_info, start_date, end_date):
                                     for i in range(0, len(remaining_files), optimized_batch_size)]
 
                     try:
+                        # 添加超时控制
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = {executor.submit(delete_remaining_files_batch_parallel, batch): batch
                                     for batch in remaining_batches}
 
-                            for future in as_completed(futures):
+                            # 使用配置的超时时间
+                            timeout_seconds = timeout_minutes * 60
+                            start_time = time.time()
+                            
+                            for future in as_completed(futures, timeout=timeout_seconds):
                                 try:
-                                    pbar.update(future.result())
+                                    # 检查是否超过总时间限制
+                                    if time.time() - start_time > timeout_seconds:
+                                        print("删除单独文件操作超时，取消剩余任务")
+                                        for f in futures:
+                                            if not f.done():
+                                                f.cancel()
+                                        break
+                                        
+                                    result = future.result(timeout=300)  # 单个任务5分钟超时
+                                    pbar.update(result)
+                                except concurrent.futures.TimeoutError:
+                                    print(f"删除单独文件任务超时，取消剩余任务")
+                                    for f in futures:
+                                        if not f.done():
+                                            f.cancel()
+                                    raise FileDeletionError("删除单独文件操作超时", "步骤5:清理单独文件", "任务执行时间过长")
                                 except Exception as e:
                                     # 取消所有未完成的任务
                                     for f in futures:

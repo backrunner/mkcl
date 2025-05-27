@@ -95,9 +95,36 @@ class FileManager:
         batch_size = 1000  # 增加批处理大小
         last_id = start_id
         max_retries = 3  # 最大重试次数
+        # 添加安全检查，防止无限循环
+        max_iterations = (total_count // batch_size) + 100  # 允许一些容错空间
+        iteration_count = 0
+        last_processed_count = 0
+        stuck_counter = 0
 
         with tqdm(total=total_count, desc="扫描单独文件") as pbar:
-            while processed < total_count:
+            while processed < total_count and iteration_count < max_iterations:
+                iteration_count += 1
+                
+                # 检查是否进度卡住
+                if processed == last_processed_count:
+                    stuck_counter += 1
+                    if stuck_counter > 5:  # 连续5次没有进度更新
+                        print(f"警告: 扫描进程可能卡住，当前处理数量: {processed}/{total_count}")
+                        print(f"当前last_id: {last_id}")
+                        # 尝试跳过当前ID
+                        try:
+                            last_id_int = int(last_id, 16) if last_id else 0
+                            last_id = format(last_id_int + batch_size, 'x')
+                            stuck_counter = 0
+                            print(f"跳转到新的last_id: {last_id}")
+                        except Exception as e:
+                            print(f"无法跳转ID，退出扫描: {str(e)}")
+                            break
+                else:
+                    stuck_counter = 0
+                
+                last_processed_count = processed
+
                 try:
                     self.db_cursor.execute(
                         '''SELECT id
@@ -112,10 +139,23 @@ class FileManager:
                     )
                     results = self.db_cursor.fetchall()
                     if not results:
+                        print("没有更多结果，退出扫描")
                         break
 
                     file_ids = [result[0] for result in results]
-                    last_id = file_ids[-1]
+                    # 确保last_id正确更新，防止无限循环
+                    if file_ids:
+                        new_last_id = file_ids[-1]
+                        # 检查ID是否有进展
+                        if new_last_id == last_id:
+                            print(f"ID没有进展，尝试递增: {last_id}")
+                            try:
+                                last_id_int = int(last_id, 16)
+                                last_id = format(last_id_int + 1, 'x')
+                            except Exception:
+                                break
+                        else:
+                            last_id = new_last_id
 
                     # 过滤掉已缓存的文件ID
                     uncached_file_ids = []
@@ -194,7 +234,8 @@ class FileManager:
                     pbar.update(current_batch_size)
                     pbar.set_postfix({
                         '已处理': processed,
-                        '待删除': deleted
+                        '待删除': deleted,
+                        '迭代': iteration_count
                     })
                 except Exception as e:
                     print(f"处理文件批次失败，跳过当前批次: {str(e)}")
@@ -205,13 +246,17 @@ class FileManager:
                         # 尝试重新初始化连接
                         self.db_cursor = self.db_conn.cursor()
                         # 增加last_id，避免无限循环
-                        last_id_increment = int(last_id, 16) + 1 if last_id else 0
+                        last_id_increment = int(last_id, 16) + batch_size if last_id else batch_size
                         last_id = format(last_id_increment, 'x')
+                        print(f"跳转到新的起始ID: {last_id}")
                     except Exception as conn_error:
                         print(f"重新初始化连接失败: {str(conn_error)}")
                         # 如果连接恢复失败，退出循环
                         break
 
+        if iteration_count >= max_iterations:
+            print(f"警告: 达到最大迭代次数 ({max_iterations})，可能存在数据异常")
+        
         print(f"\n找到 {deleted} 个单独文件需要删除")
 
     def get_file_references_batch(self, file_ids):

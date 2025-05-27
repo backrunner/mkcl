@@ -16,6 +16,7 @@ parser.add_argument('-n', '--no_post', help='No Post Mode', action='store_true')
 parser.add_argument('-chart','--chart',metavar='DAYS', help='Clean Chart days', action='store', type=int)
 parser.add_argument('-chart_only','--chart_only',metavar='DAYS', help='Clean Chart days only', action='store', type=int)
 parser.add_argument('-sfile','--single_file', help='Clean Single File Only', action='store_true')
+parser.add_argument('-t', '--timeout', metavar='MINUTES', help='Total operation timeout in minutes (default: 180)', action='store', default=180, type=int)
 
 args = parser.parse_args()
 
@@ -59,11 +60,11 @@ if args.chart_only is not None:
 start_time = datetime.datetime.now()
 cleaning_result = clean_data([db_config['host'], db_config['port'], db_config['db'], db_config['user'], db_config['pass']], 
                              [redis_config['host'], redis_config['port'], redis_config.get('pass'), redis_config.get('db')], 
-                             start_date_str, end_date_str)
+                             start_date_str, end_date_str, args.timeout)
 end_time = datetime.datetime.now()
 duration = end_time - start_time
-result_message = '成功执行数据库清理\n清理范围:{}至{}\n{}\n用时{}s'.format(
-    start_date_str, end_date_str, cleaning_result, duration.seconds)
+result_message = '成功执行数据库清理\n清理范围:{}至{}\n{}\n用时{}s\n超时设置:{}分钟'.format(
+    start_date_str, end_date_str, cleaning_result, duration.seconds, args.timeout)
 
 if args.chart is not None:
     clean_chart([db_config['host'], db_config['port'], db_config['db'], db_config['user'], db_config['pass']], args.chart)

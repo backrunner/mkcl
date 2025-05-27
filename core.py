@@ -394,7 +394,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                         current_batch = notes_to_process[:batch_size]
                         notes_to_process = notes_to_process[batch_size:]
 
-                        batch_to_delete = note_manager.analyze_notes_batch_parallel(
+                        batch_to_delete = note_manager.analyze_notes_batch(
                             current_batch,
                             end_id,
                             redis_conn,
@@ -446,8 +446,8 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                             # 检查全局超时
                             check_global_timeout()
                             
-                            # 使用主连接删除，避免连接池问题
-                            note_manager.delete_notes_batch(batch)
+                            # 使用安全删除方法，避免外键约束死锁
+                            note_manager.delete_notes_batch_safe(batch)
                             pbar.update(len(batch))
                             
                         except psycopg.errors.DeadlockDetected as e:
@@ -463,7 +463,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                                 smaller_batches = [batch[i:i+50] for i in range(0, len(batch), 50)]
                                 for small_batch in smaller_batches:
                                     try:
-                                        note_manager.delete_notes_batch(small_batch)
+                                        note_manager.delete_notes_batch_safe(small_batch)
                                     except Exception as small_e:
                                         print(f"小批次删除也失败: {str(small_e)}")
                                         continue

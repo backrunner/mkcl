@@ -331,34 +331,71 @@ class NoteManager:
         # 确保note_ids是列表类型
         note_ids = list(note_ids)
 
-        # 先检查note_history表是否存在
-        self.db_cursor.execute(
-            """
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables
-                WHERE table_schema = 'public'
-                AND table_name = 'note_history'
+        # 先检查note_history表是否存在，添加安全检查
+        try:
+            # 检查游标状态，如果已关闭则重新创建
+            if self.db_cursor.closed:
+                self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
+            
+            self.db_cursor.execute(
+                """
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                    AND table_name = 'note_history'
+                )
+                """
             )
-            """
-        )
-        note_history_exists = self.db_cursor.fetchone()["exists"]
+            result = self.db_cursor.fetchone()
+            # 安全检查：确保查询返回了结果
+            note_history_exists = result["exists"] if result and "exists" in result else False
+        except Exception as e:
+            print(f"检查note_history表存在性失败: {str(e)}")
+            # 回滚事务并重新创建游标
+            try:
+                self.db_conn.rollback()
+                self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
+            except Exception:
+                pass
+            # 默认假设表不存在，避免程序崩溃
+            note_history_exists = False
 
         # 如果note_history表存在，先删除note_history表中的关联记录
         if note_history_exists:
-            # 不使用预编译语句，直接使用参数化查询
-            self.db_cursor.execute(
-                """DELETE FROM note_history nh
-                   WHERE nh."targetId" = ANY(%s)""",
-                [note_ids]
-            )
+            try:
+                # 不使用预编译语句，直接使用参数化查询
+                self.db_cursor.execute(
+                    """DELETE FROM note_history nh
+                       WHERE nh."targetId" = ANY(%s)""",
+                    [note_ids]
+                )
+            except Exception as e:
+                print(f"删除note_history记录失败: {str(e)}")
+                # 回滚事务并重新创建游标
+                try:
+                    self.db_conn.rollback()
+                    self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
+                except Exception:
+                    pass
+                # 继续执行，不中断整个删除流程
 
         # 再删除note表中的记录
-        self.db_cursor.execute(
-            """DELETE FROM note WHERE id = ANY(%s)""",
-            [note_ids]
-        )
-
-        self.db_conn.commit()
+        try:
+            self.db_cursor.execute(
+                """DELETE FROM note WHERE id = ANY(%s)""",
+                [note_ids]
+            )
+            self.db_conn.commit()
+        except Exception as e:
+            print(f"删除note记录失败: {str(e)}")
+            # 回滚事务
+            try:
+                self.db_conn.rollback()
+                self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
+            except Exception:
+                pass
+            # 重新抛出异常，让上层处理
+            raise
 
     def analyze_notes_batch_parallel(self, note_ids: List[str], end_id: str,
                                    redis_conn: RedisConnection, file_manager,

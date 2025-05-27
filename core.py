@@ -148,9 +148,12 @@ def clean_data(db_info, redis_info, start_date, end_date):
             max_workers = min(cpu_count(), 8)  # 限制最大工作线程数，避免过多线程
 
             def delete_notes_batch_parallel(batch):
+                # 每个线程使用独立的数据库连接，避免并发问题
                 try:
-                    note_manager.delete_notes_batch(batch)
-                    return len(batch)
+                    with db.get_connection() as thread_db_conn:
+                        thread_note_manager = NoteManager(thread_db_conn)
+                        thread_note_manager.delete_notes_batch(batch)
+                        return len(batch)
                 except Exception as e:
                     print(f"删除note批次时出错: {str(e)}")
                     raise  # 重新抛出异常，让主线程能够捕获
@@ -207,9 +210,12 @@ def clean_data(db_info, redis_info, start_date, end_date):
 
             # 使用多线程并行删除文件
             def delete_files_batch_parallel(batch):
+                # 每个线程使用独立的数据库连接，避免并发问题
                 try:
-                    file_manager.delete_files_batch(batch)
-                    return len(batch)
+                    with db.get_connection() as thread_db_conn:
+                        thread_file_manager = FileManager(thread_db_conn)
+                        thread_file_manager.delete_files_batch(batch)
+                        return len(batch)
                 except Exception as e:
                     print(f"删除文件批次时出错: {str(e)}")
                     raise  # 重新抛出异常，让主线程能够捕获
@@ -274,6 +280,17 @@ def clean_data(db_info, redis_info, start_date, end_date):
                 raise RedisError("获取待删除单独文件列表失败", "步骤5:清理单独文件", error_details)
 
             # 使用多线程并行删除单独文件
+            def delete_remaining_files_batch_parallel(batch):
+                # 每个线程使用独立的数据库连接，避免并发问题
+                try:
+                    with db.get_connection() as thread_db_conn:
+                        thread_file_manager = FileManager(thread_db_conn)
+                        thread_file_manager.delete_files_batch(batch)
+                        return len(batch)
+                except Exception as e:
+                    print(f"删除单独文件批次时出错: {str(e)}")
+                    raise  # 重新抛出异常，让主线程能够捕获
+                    
             try:
                 with tqdm(total=len(remaining_files), desc="删除单独文件") as pbar:
                     # 优化批处理大小
@@ -283,7 +300,7 @@ def clean_data(db_info, redis_info, start_date, end_date):
 
                     try:
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                            futures = {executor.submit(delete_files_batch_parallel, batch): batch
+                            futures = {executor.submit(delete_remaining_files_batch_parallel, batch): batch
                                     for batch in remaining_batches}
 
                             for future in as_completed(futures):

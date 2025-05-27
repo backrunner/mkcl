@@ -77,7 +77,9 @@ class FileManager:
                 AND "userHost" IS NOT NULL''',
                 [start_id, end_id]
             )
-            total_count = self.db_cursor.fetchone()[0]
+            result = self.db_cursor.fetchone()
+            # 安全检查：确保查询返回了结果
+            total_count = result[0] if result else 0
         except Exception as e:
             print(f"获取文件总数失败: {str(e)}")
             # 回滚事务并重新连接

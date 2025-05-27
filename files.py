@@ -301,7 +301,19 @@ class FileManager:
                 LEFT JOIN file_refs fr ON fr.file_id = f.file_id
             """, [file_ids, file_ids])
 
-            ref_results = {row[0]: row[1] for row in self.db_cursor.fetchall()}
+            # 安全的字典构建
+            ref_results = {}
+            for row in self.db_cursor.fetchall():
+                try:
+                    if len(row) >= 2:
+                        ref_results[row[0]] = row[1]
+                    else:
+                        if self.verbose:
+                            print(f"警告：引用结果行数据不完整: {row}")
+                except Exception as row_error:
+                    if self.verbose:
+                        print(f"处理引用结果行数据时出错: {row}, 错误: {str(row_error)}")
+                    continue
 
             # 第二步：批量检查头像和横幅使用情况（简化查询）
             self.db_cursor.execute("""
@@ -311,7 +323,16 @@ class FileManager:
                 AND ("avatarId" IS NOT NULL OR "bannerId" IS NOT NULL)
             """, [file_ids, file_ids])
 
-            avatar_banner_files = {row[0] for row in self.db_cursor.fetchall() if row[0]}
+            # 安全的集合构建
+            avatar_banner_files = set()
+            for row in self.db_cursor.fetchall():
+                try:
+                    if len(row) >= 1 and row[0]:
+                        avatar_banner_files.add(row[0])
+                except Exception as row_error:
+                    if self.verbose:
+                        print(f"处理头像横幅行数据时出错: {row}, 错误: {str(row_error)}")
+                    continue
 
             # 合并结果
             result = {}
@@ -366,13 +387,25 @@ class FileManager:
         """, [file_ids, file_ids, file_ids, file_ids])
 
         results = self.db_cursor.fetchall()
-        return {
-            row[0]: {
-                'ref_count': row[1],
-                'is_avatar_banner': row[2]
-            }
-            for row in results
-        }
+        
+        # 安全的字典构建
+        file_info = {}
+        for row in results:
+            try:
+                if len(row) >= 3:
+                    file_info[row[0]] = {
+                        'ref_count': row[1],
+                        'is_avatar_banner': row[2]
+                    }
+                else:
+                    if self.verbose:
+                        print(f"警告：优化查询行数据不完整: {row}")
+            except Exception as row_error:
+                if self.verbose:
+                    print(f"处理优化查询行数据时出错: {row}, 错误: {str(row_error)}")
+                continue
+        
+        return file_info
 
     def get_file_references_batch(self, file_ids):
         """
@@ -411,7 +444,21 @@ class FileManager:
             if not results:
                 return {}
 
-            return dict(results)
+            # 安全的字典构建
+            ref_dict = {}
+            for row in results:
+                try:
+                    if len(row) >= 2:  # 确保行有足够的列
+                        ref_dict[row[0]] = row[1]
+                    else:
+                        if self.verbose:
+                            print(f"警告：引用计数行数据不完整: {row}")
+                except Exception as row_error:
+                    if self.verbose:
+                        print(f"处理引用计数行数据时出错: {row}, 错误: {str(row_error)}")
+                    continue
+            
+            return ref_dict
 
         except Exception as e:
             if self.verbose:
@@ -455,13 +502,24 @@ class FileManager:
             if not results:
                 return {}
 
-            return {
-                row[0]: {
-                    "isLink": row[1] if row[1] is not None else False,
-                    "userHost": row[2]
-                }
-                for row in results
-            }
+            # 安全的字典构建，增加错误处理
+            file_info = {}
+            for row in results:
+                try:
+                    if len(row) >= 3:  # 确保行有足够的列
+                        file_info[row[0]] = {
+                            "isLink": row[1] if row[1] is not None else False,
+                            "userHost": row[2]
+                        }
+                    else:
+                        if self.verbose:
+                            print(f"警告：行数据不完整: {row}")
+                except Exception as row_error:
+                    if self.verbose:
+                        print(f"处理行数据时出错: {row}, 错误: {str(row_error)}")
+                    continue
+            
+            return file_info
 
         except Exception as e:
             if self.verbose:

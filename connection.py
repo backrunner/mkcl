@@ -71,7 +71,7 @@ class RedisConnection:
         """记录失败操作"""
         self.circuit_breaker['failures'] += 1
         self.circuit_breaker['last_failure_time'] = time.time()
-        
+
         if self.circuit_breaker['failures'] >= self.circuit_breaker['failure_threshold']:
             self.circuit_breaker['state'] = 'open'
             print(f"Redis熔断器开启，连续失败次数: {self.circuit_breaker['failures']}")
@@ -145,7 +145,7 @@ class DatabaseConnection:
 
     def _create_connection_pool(self):
         conninfo = "dbname={} user={} password={} host={} port={}".format(
-            self.db_info[2], self.db_info[3], self.db_info[4], 
+            self.db_info[2], self.db_info[3], self.db_info[4],
             self.db_info[0], self.db_info[1]
         )
         return psycopg_pool.ConnectionPool(
@@ -159,69 +159,9 @@ class DatabaseConnection:
 
     @contextmanager
     def get_connection(self):
-        conn = None
-        max_retries = 3
-        retry_count = 0
-        
-        while retry_count < max_retries:
-            try:
-                # 添加超时控制，防止无限等待
-                conn = self.pool.getconn(timeout=10.0)
-                
-                # 记录连接来源池的信息，用于正确返回
-                original_pool = self.pool
-                
-                yield conn
-                break
-            except (psycopg.OperationalError, psycopg_pool.PoolTimeout) as e:
-                retry_count += 1
-                if retry_count >= max_retries:
-                    print(f"数据库连接失败，已达最大重试次数: {str(e)}")
-                    raise
-                else:
-                    print(f"数据库连接失败，重试 {retry_count}/{max_retries}: {str(e)}")
-                    # 尝试重新创建连接池
-                    try:
-                        self.pool = self._create_connection_pool()
-                    except Exception as pool_error:
-                        print(f"重新创建连接池失败: {str(pool_error)}")
-                    # 等待短暂时间后重试
-                    time.sleep(1.0 * retry_count)
-            except Exception as e:
-                print(f"意外的数据库错误: {str(e)}")
-                if conn:
-                    try:
-                        # 确保连接返回到正确的池
-                        if hasattr(locals(), 'original_pool') and original_pool:
-                            original_pool.putconn(conn)
-                        else:
-                            self.pool.putconn(conn)
-                    except Exception as put_error:
-                        print(f"返回连接到池时出错: {str(put_error)}")
-                        # 如果返回连接失败，关闭连接避免泄漏
-                        try:
-                            conn.close()
-                        except:
-                            pass
-                raise
-            finally:
-                # 确保连接始终返回到正确的池中
-                if conn:
-                    try:
-                        # 检查连接状态，只有正常状态的连接才返回池中
-                        if conn.closed == 0:  # 0表示连接正常
-                            if hasattr(locals(), 'original_pool') and original_pool:
-                                original_pool.putconn(conn)
-                            else:
-                                self.pool.putconn(conn)
-                        else:
-                            # 连接已关闭，直接丢弃
-                            print("连接已关闭，不返回到池中")
-                    except Exception as put_error:
-                        print(f"返回连接到池时出错: {str(put_error)}")
-                        # 如果返回连接失败，尝试关闭连接
-                        try:
-                            if not conn.closed:
-                                conn.close()
-                        except:
-                            pass
+        """
+        获取数据库连接的上下文管理器，使用连接池自动管理
+        """
+        # 使用连接池的上下文管理器，自动处理连接的获取和返回
+        with self.pool.connection() as conn:
+            yield conn

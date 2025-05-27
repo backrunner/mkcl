@@ -13,10 +13,11 @@ class NoteManager:
     Note管理类
     """
 
-    def __init__(self, db_connection):
+    def __init__(self, db_connection, verbose=False):
         # 使用psycopg的dict_row作为row_factory
         self.db_cursor = db_connection.cursor(row_factory=dict_row)
         self.db_conn = db_connection
+        self.verbose = verbose
         # 预编译常用SQL语句
         self._prepare_statements()
 
@@ -82,6 +83,14 @@ class NoteManager:
                     break
         
         print(f"共收集到 {len(all_notes):,} 个Note ID")
+        
+        # 添加调试信息：显示一些note ID样本
+        if all_notes and self.verbose:
+            print(f"Note ID样本: {all_notes[:5]}")
+            # 检查ID长度和格式
+            sample_id = all_notes[0]
+            print(f"样本ID长度: {len(sample_id)}, 类型: {type(sample_id)}")
+        
         return all_notes
 
     def get_pinned_notes(self, note_ids):
@@ -124,6 +133,34 @@ class NoteManager:
 
             # 确保 note_ids 是列表类型
             note_ids = list(note_ids)
+            
+            # 添加调试信息：首先检查这些note是否存在
+            if self.verbose:
+                self.db_cursor.execute(
+                    "SELECT id FROM note WHERE id = ANY(%s::text[])",
+                    [note_ids]
+                )
+                existing_notes = [row["id"] for row in self.db_cursor.fetchall()]
+                
+                if not existing_notes:
+                    print(f"调试: 批次中没有找到任何note在数据库中 {note_ids[:3]}...")
+                    # 做一个更具体的测试 - 检查第一个ID是否存在
+                    test_id = note_ids[0]
+                    self.db_cursor.execute("SELECT COUNT(*) as count FROM note WHERE id = %s", [test_id])
+                    count_result = self.db_cursor.fetchone()
+                    print(f"调试: 单独查询第一个ID '{test_id}' 的结果: {count_result['count'] if count_result else 'None'}")
+                    
+                    # 检查数据库中实际存在的note样本
+                    self.db_cursor.execute("SELECT id FROM note LIMIT 5")
+                    sample_notes = self.db_cursor.fetchall()
+                    if sample_notes:
+                        print(f"调试: 数据库中实际存在的note样本: {[row['id'] for row in sample_notes]}")
+                    else:
+                        print("调试: 数据库中没有找到任何note！")
+                    return {}
+                elif len(existing_notes) != len(note_ids):
+                    missing_notes = set(note_ids) - set(existing_notes)
+                    print(f"调试: 批次中有 {len(missing_notes)} 个note不存在，继续处理现有的 {len(existing_notes)} 个")
 
             # 当ID数量超过阈值时，使用临时表优化
             if len(note_ids) > 100:
@@ -211,10 +248,14 @@ class NoteManager:
 
             # 检查查询是否成功执行
             if self.db_cursor.description is None:
+                if self.verbose:
+                    print("调试: 查询未成功执行，description为None")
                 return {}
 
             results = self.db_cursor.fetchall()
             if not results:
+                if self.verbose:
+                    print(f"调试: 复杂查询未返回结果")
                 return {}
 
             notes_info = {}
@@ -231,15 +272,27 @@ class NoteManager:
                     "isFlagged": row["isFlagged"]
                 }
 
+            if self.verbose:
+                print(f"调试: 成功获取 {len(notes_info)} 个note信息")
             return notes_info
 
-        except Exception:
+        except Exception as e:
+            if self.verbose:
+                print(f"调试: get_notes_batch异常: {str(e)}")
+                import traceback
+                print(f"调试: 异常详情: {traceback.format_exc()}")
             return {}
 
     def analyze_notes_batch(self, note_ids, end_id, redis_conn: RedisConnection, file_manager, batch_size=100):
         """
         批量分析note
         """
+        if self.verbose:
+            print(f"开始分析note批次，输入 {len(note_ids)} 个ID")
+            if note_ids:
+                print(f"输入的note ID样本: {note_ids[:3]}")
+                print(f"end_id: {end_id}")
+        
         # 获取所有相关note信息
         all_related_notes = {}
         to_process = set(note_ids)
@@ -251,6 +304,9 @@ class NoteManager:
 
         while to_process and current_depth < max_depth:
             current_batch = list(to_process)[:batch_size]
+            if self.verbose:
+                print(f"处理批次 {current_depth + 1}，批次大小: {len(current_batch)}")
+            
             notes_info = self.get_notes_batch(current_batch)
             
             # 如果批次没有返回任何数据，避免无限循环
@@ -259,6 +315,8 @@ class NoteManager:
                 to_process = to_process - set(current_batch)
                 continue
 
+            if self.verbose:
+                print(f"批次返回 {len(notes_info)} 个note的信息")
             for note_id, info in notes_info.items():
                 all_related_notes[note_id] = info
                 processed.add(note_id)
@@ -272,12 +330,15 @@ class NoteManager:
             to_process = to_process - processed
             current_depth += 1
             
-            # 每100次迭代检查一次进度
-            if current_depth % 100 == 0:
+            # 每10次迭代检查一次进度（降低频率）
+            if current_depth % 10 == 0 and self.verbose:
                 print(f"Note关联追踪深度: {current_depth}, 待处理: {len(to_process)}")
 
         if current_depth >= max_depth:
             print(f"警告: Note关联追踪达到最大深度限制 ({max_depth})，可能存在循环引用")
+
+        if self.verbose:
+            print(f"关联分析完成，共收集到 {len(all_related_notes)} 个相关note")
 
         # 分析处理结果
         notes_to_delete = set()
@@ -533,7 +594,7 @@ class NoteManager:
                 current_depth += 1
                 
                 # 每100次迭代检查一次进度
-                if current_depth % 100 == 0:
+                if current_depth % 100 == 0 and self.verbose:
                     print(f"并行Note关联追踪深度: {current_depth}, 待处理: {len(to_process)}")
 
             if current_depth >= max_depth:

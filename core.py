@@ -13,121 +13,193 @@ import psycopg
 from redis.exceptions import ConnectionError, TimeoutError
 import time
 
-def _optimize_database_indexes(db_conn):
+def _create_index_safely(db_connection_manager, index_name, table_name, columns, index_type="btree", where_clause=""):
+    """
+    安全地创建索引，优先使用CONCURRENTLY模式
+    """
+    try:
+        # 使用DatabaseConnection的get_connection方法获取新连接
+        with db_connection_manager.get_connection() as conn:
+            # 使用独立连接和autocommit模式
+            old_autocommit = conn.autocommit
+            conn.autocommit = True
+            cursor = conn.cursor()
+            
+            try:
+                # 尝试CONCURRENTLY创建
+                concurrent_sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name} ON {table_name}'
+                if index_type == "gin":
+                    concurrent_sql += f' USING gin ({columns})'
+                else:
+                    concurrent_sql += f' ({columns})'
+                
+                if where_clause:
+                    concurrent_sql += f' {where_clause}'
+                
+                cursor.execute(concurrent_sql)
+                print(f"✓ 索引 {index_name} 创建成功 (CONCURRENTLY)")
+                return True
+                
+            except Exception as e:
+                print(f"CONCURRENTLY模式失败: {str(e)}")
+                
+                # 回退到普通模式
+                try:
+                    normal_sql = f'CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}'
+                    if index_type == "gin":
+                        normal_sql += f' USING gin ({columns})'
+                    else:
+                        normal_sql += f' ({columns})'
+                    
+                    if where_clause:
+                        normal_sql += f' {where_clause}'
+                    
+                    cursor.execute(normal_sql)
+                    print(f"✓ 索引 {index_name} 创建成功 (普通模式)")
+                    return True
+                    
+                except Exception as normal_error:
+                    print(f"✗ 索引 {index_name} 创建失败: {str(normal_error)}")
+                    return False
+            finally:
+                conn.autocommit = old_autocommit
+                
+    except Exception as conn_error:
+        print(f"✗ 连接错误，无法创建索引 {index_name}: {str(conn_error)}")
+        return False
+
+def _optimize_database_indexes(db_connection_manager):
     """
     检查并创建必要的索引以优化查询性能
     """
-    cursor = db_conn.cursor()
-    
-    # 首先检查和优化PostgreSQL配置
-    _check_postgresql_config(cursor)
-    
-    # 关键索引列表 - 根据查询模式优化，与README.md保持一致
-    indexes_to_check = [
-        # Note表基本索引 - 与README.md一致
-        ("idx_note_id_composite", "note", '(id, "userId", "userHost", "renoteId", "replyId")'),
-        ("idx_note_renote_reply", "note", '("renoteId", "replyId")'),
-        ("idx_note_fileids", "note", '"fileIds"', "gin"),
+    # 获取一个连接用于索引检查
+    with db_connection_manager.get_connection() as db_conn:
+        cursor = db_conn.cursor()
         
-        # 时间范围查询优化 - 与README.md一致
-        ("idx_note_id_range", "note", "id DESC"),
-        ("idx_drive_file_id_range", "drive_file", "id DESC"),
-        ("idx_drive_file_link_host_id", "drive_file", '("isLink", "userHost", id)', "btree", 'WHERE "isLink" IS TRUE AND "userHost" IS NOT NULL'),
-        ("idx_drive_file_link_host_id_btree", "drive_file", "id", "btree", 'WHERE "isLink" IS TRUE AND "userHost" IS NOT NULL'),
+        # 首先检查和优化PostgreSQL配置
+        _check_postgresql_config(cursor)
         
-        # User表索引 - 与README.md一致
-        ("idx_user_avatar_banner", "user", '("avatarId", "bannerId")'),
-        ("idx_user_host_composite", "user", '(host, "followersCount", "followingCount")'),
-        ("idx_user_id_host_counts", "user", '(id, host, "followersCount", "followingCount")'),
-        ("idx_user_is_local", "user", "id", "btree", "WHERE host IS NULL"),
-        
-        # Note关联表索引 - 与README.md一致
-        ("idx_note_reaction_noteid", "note_reaction", '"noteId"'),
-        ("idx_note_favorite_noteid", "note_favorite", '"noteId"'),
-        ("idx_clip_note_noteid", "clip_note", '"noteId"'),
-        ("idx_note_unread_noteid", "note_unread", '"noteId"'),
-        ("idx_note_watching_noteid", "note_watching", '"noteId"'),
-        ("idx_user_note_pining_noteid", "user_note_pining", '"noteId"'),
-        
-        # 帖子分析优化索引 - 与README.md一致
-        ("idx_note_userid_composite", "note", '("userId", "userHost", "hasPoll")', "btree", 'WHERE "hasPoll" = true OR "userHost" IS NULL'),
-        
-        # GIN索引 - 与README.md一致
-        ("idx_note_non_empty_fileids", "note", '"fileIds"', "gin", 'WHERE array_length("fileIds", 1) > 0'),
-        
-        # 文件计数索引 - 与README.md一致
-        ("idx_note_has_files", "note", '(array_length("fileIds", 1) > 0)', "btree", 'WHERE array_length("fileIds", 1) > 0'),
-        
-        # 历史记录索引 - 与README.md一致
-        ("idx_note_history_targetid", "note_history", '"targetId"'),
-    ]
-    
-    print("正在检查和创建性能优化索引...")
-    
-    for index_info in indexes_to_check:
-        index_name = index_info[0]
-        table_name = index_info[1]
-        columns = index_info[2]
-        index_type = index_info[3] if len(index_info) > 3 else "btree"
-        where_clause = index_info[4] if len(index_info) > 4 else ""
-        
-        try:
-            # 检查索引是否存在
-            cursor.execute("""
-                SELECT 1 FROM pg_indexes 
-                WHERE indexname = %s AND tablename = %s
-            """, [index_name, table_name])
+        # 关键索引列表 - 根据查询模式优化，与README.md保持一致
+        indexes_to_check = [
+            # Note表基本索引 - 与README.md一致
+            ("idx_note_id_composite", "note", '(id, "userId", "userHost", "renoteId", "replyId")'),
+            ("idx_note_renote_reply", "note", '("renoteId", "replyId")'),
+            ("idx_note_fileids", "note", '"fileIds"', "gin"),
             
-            if not cursor.fetchone():
-                # 检查表是否存在
-                cursor.execute("""
-                    SELECT 1 FROM information_schema.tables 
-                    WHERE table_name = %s AND table_schema = 'public'
-                """, [table_name])
-                
-                if cursor.fetchone():
-                    # 构建创建索引的SQL
-                    if index_type == "gin":
-                        create_sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name} ON {table_name} USING gin ({columns})'
-                    else:
-                        create_sql = f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name} ON {table_name} ({columns})'
-                    
-                    # 添加WHERE条件（如果有）
-                    if where_clause:
-                        create_sql += f' {where_clause}'
-                    
-                    print(f"创建索引: {index_name}")
-                    cursor.execute(create_sql)
-                    db_conn.commit()
-                else:
-                    print(f"表 {table_name} 不存在，跳过索引 {index_name}")
-            else:
-                print(f"索引 {index_name} 已存在")
-                
-        except Exception as e:
-            print(f"处理索引 {index_name} 时出错: {str(e)}")
-            # 回滚并继续处理下一个索引
-            try:
-                db_conn.rollback()
-            except:
-                pass
-    
-    # 更新表统计信息
-    try:
-        print("更新表统计信息...")
-        tables_to_analyze = ['note', 'drive_file', 'user', 'note_reaction', 'note_favorite', 
-                           'clip_note', 'note_unread', 'note_watching']
+            # 时间范围查询优化 - 与README.md一致
+            ("idx_note_id_range", "note", "id DESC"),
+            ("idx_drive_file_id_range", "drive_file", "id DESC"),
+            ("idx_drive_file_link_host_id", "drive_file", '("isLink", "userHost", id)', "btree", 'WHERE "isLink" IS TRUE AND "userHost" IS NOT NULL'),
+            ("idx_drive_file_link_host_id_btree", "drive_file", "id", "btree", 'WHERE "isLink" IS TRUE AND "userHost" IS NOT NULL'),
+            
+            # User表索引 - 与README.md一致
+            ("idx_user_avatar_banner", "user", '("avatarId", "bannerId")'),
+            ("idx_user_host_composite", "user", '(host, "followersCount", "followingCount")'),
+            ("idx_user_id_host_counts", "user", '(id, host, "followersCount", "followingCount")'),
+            ("idx_user_is_local", "user", "id", "btree", "WHERE host IS NULL"),
+            
+            # Note关联表索引 - 与README.md一致
+            ("idx_note_reaction_noteid", "note_reaction", '"noteId"'),
+            ("idx_note_favorite_noteid", "note_favorite", '"noteId"'),
+            ("idx_clip_note_noteid", "clip_note", '"noteId"'),
+            ("idx_note_unread_noteid", "note_unread", '"noteId"'),
+            ("idx_note_watching_noteid", "note_watching", '"noteId"'),
+            ("idx_user_note_pining_noteid", "user_note_pining", '"noteId"'),
+            
+            # 帖子分析优化索引 - 与README.md一致
+            ("idx_note_userid_composite", "note", '("userId", "userHost", "hasPoll")', "btree", 'WHERE "hasPoll" = true OR "userHost" IS NULL'),
+            
+            # GIN索引 - 与README.md一致
+            ("idx_note_non_empty_fileids", "note", '"fileIds"', "gin", 'WHERE array_length("fileIds", 1) > 0'),
+            
+            # 文件计数索引 - 与README.md一致
+            ("idx_note_has_files", "note", '(array_length("fileIds", 1) > 0)', "btree", 'WHERE array_length("fileIds", 1) > 0'),
+            
+            # 历史记录索引 - 与README.md一致
+            ("idx_note_history_targetid", "note_history", '"targetId"'),
+        ]
         
-        for table in tables_to_analyze:
+        print("正在检查和创建性能优化索引...")
+        created_count = 0
+        skipped_count = 0
+        failed_count = 0
+        
+        for index_info in indexes_to_check:
+            index_name = index_info[0]
+            table_name = index_info[1]
+            columns = index_info[2]
+            index_type = index_info[3] if len(index_info) > 3 else "btree"
+            where_clause = index_info[4] if len(index_info) > 4 else ""
+            
             try:
-                cursor.execute(f"ANALYZE {table}")
-                db_conn.commit()
-            except Exception as e:
-                print(f"分析表 {table} 失败: {str(e)}")
-                db_conn.rollback()
+                # 检查索引是否存在
+                cursor.execute("""
+                    SELECT 1 FROM pg_indexes 
+                    WHERE indexname = %s AND tablename = %s
+                """, [index_name, table_name])
                 
-    except Exception as e:
-        print(f"更新统计信息失败: {str(e)}")
+                if not cursor.fetchone():
+                    # 检查表是否存在
+                    cursor.execute("""
+                        SELECT 1 FROM information_schema.tables 
+                        WHERE table_name = %s AND table_schema = 'public'
+                    """, [table_name])
+                    
+                    if cursor.fetchone():
+                        print(f"创建索引: {index_name}")
+                        if _create_index_safely(db_connection_manager, index_name, table_name, columns, index_type, where_clause):
+                            created_count += 1
+                        else:
+                            failed_count += 1
+                    else:
+                        print(f"表 {table_name} 不存在，跳过索引 {index_name}")
+                        skipped_count += 1
+                else:
+                    print(f"索引 {index_name} 已存在")
+                    
+            except Exception as e:
+                print(f"处理索引 {index_name} 时出错: {str(e)}")
+                failed_count += 1
+                # 回滚并继续处理下一个索引
+                try:
+                    db_conn.rollback()
+                except:
+                    pass
+        
+        print(f"\n索引创建总结:")
+        print(f"  ✓ 成功创建: {created_count} 个")
+        print(f"  - 跳过: {skipped_count} 个")
+        print(f"  ✗ 失败: {failed_count} 个")
+        
+        # 更新表统计信息
+        try:
+            print("\n更新表统计信息...")
+            tables_to_analyze = [
+                'note', 'drive_file', '"user"', 'note_reaction', 'note_favorite', 
+                'clip_note', 'note_unread', 'note_watching'
+            ]
+            
+            analyze_success = 0
+            for table in tables_to_analyze:
+                try:
+                    cursor.execute(f"ANALYZE {table}")
+                    db_conn.commit()
+                    analyze_success += 1
+                    # 显示时去掉引号，更美观
+                    display_name = table.strip('"')
+                    print(f"  ✓ 分析表 {display_name}")
+                except Exception as e:
+                    display_name = table.strip('"')
+                    print(f"  ✗ 分析表 {display_name} 失败: {str(e)}")
+                    try:
+                        db_conn.rollback()
+                    except:
+                        pass
+            
+            print(f"统计信息更新完成: {analyze_success}/{len(tables_to_analyze)} 个表")
+                    
+        except Exception as e:
+            print(f"更新统计信息失败: {str(e)}")
 
 def _check_postgresql_config(cursor):
     """
@@ -225,9 +297,11 @@ class FileDeletionError(CleanupError):
     """文件删除错误"""
     pass
 
-def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180):
+def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, verbose=False):
     print("开始数据清理流程...")
     print(f"配置超时时间: {timeout_minutes} 分钟")
+    if verbose:
+        print("启用详细调试模式")
     
     # 全局超时控制
     global_start_time = time.time()
@@ -246,8 +320,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180):
     # 添加索引优化步骤
     print("检查和优化数据库索引...")
     try:
-        with db.get_connection() as db_conn:
-            _optimize_database_indexes(db_conn)
+        _optimize_database_indexes(db)
     except Exception as e:
         print(f"索引优化失败，继续执行: {str(e)}")
 
@@ -285,8 +358,8 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180):
             except ValueError as e:
                 raise CleanupError(f"日期格式错误: {str(e)}", "参数验证阶段")
 
-            note_manager = NoteManager(db_conn)
-            file_manager = FileManager(db_conn)
+            note_manager = NoteManager(db_conn, verbose=verbose)
+            file_manager = FileManager(db_conn, verbose=verbose)
 
             print("\n步骤 1/5: 收集需要处理的note...")
             try:

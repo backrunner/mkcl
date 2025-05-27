@@ -7,13 +7,14 @@ class FileManager:
     文件相关操作类
     """
 
-    def __init__(self, db_connection):
+    def __init__(self, db_connection, verbose=False):
         """
         初始化数据库游标
         """
         try:
             self.db_conn = db_connection
             self.db_cursor = db_connection.cursor()
+            self.verbose = verbose
         except Exception as e:
             print(f"初始化文件管理器失败: {str(e)}")
             raise

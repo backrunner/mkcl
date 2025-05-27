@@ -66,7 +66,7 @@ class FileManager:
 
     def get_single_files(self, start_date, end_date, redis_conn: RedisConnection):
         """
-        获取在一段时间内所有的单独文件id列表，使用优化的批量查询
+        获取在一段时间内所有的单独文件id列表，使用高度优化的批量查询
         """
         start_id = generate_id(int(start_date.timestamp() * 1000))
         end_id = generate_id(int(end_date.timestamp() * 1000))
@@ -91,7 +91,8 @@ class FileManager:
 
         processed = 0
         deleted = 0
-        batch_size = 2000  # 增加批处理大小
+        # 大幅增加批处理大小以减少数据库往返次数
+        batch_size = 5000  # 从2000增加到5000
         last_id = start_id
         max_retries = 3
         max_iterations = (total_count // batch_size) + 100
@@ -101,15 +102,26 @@ class FileManager:
         import time
         scan_start_time = time.time()
 
+        # 预编译Redis管道操作，减少重复创建开销
+        def bulk_cache_check(file_ids_batch):
+            """批量检查缓存状态，使用更大的管道"""
+            try:
+                pipeline = redis_conn.pipeline()
+                for fid in file_ids_batch:
+                    pipeline.sismember('file_cache', fid)
+                return redis_conn.execute(lambda: pipeline.execute())
+            except Exception:
+                return [False] * len(file_ids_batch)
+
         with tqdm(total=total_count, desc="扫描单独文件") as pbar:
             while processed < total_count and iteration_count < max_iterations:
                 iteration_count += 1
                 batch_start_time = time.time()
 
                 try:
-                    # 使用优化的查询，一次性获取所需的所有信息
+                    # 使用更高效的查询，减少不必要的字段
                     self.db_cursor.execute(
-                        '''SELECT df.id, df."userHost"
+                        '''SELECT df.id
                         FROM drive_file df
                         WHERE df.id > %s::text
                         AND df.id <= %s::text
@@ -129,8 +141,8 @@ class FileManager:
                     file_ids = [result[0] for result in results]
                     last_id = file_ids[-1]
 
-                    # 并行处理文件检查
-                    files_to_delete_batch = self._process_files_batch_optimized(
+                    # 使用优化的批量处理
+                    files_to_delete_batch = self._process_files_batch_ultra_optimized(
                         file_ids, redis_conn, max_retries)
 
                     deleted += files_to_delete_batch
@@ -155,7 +167,7 @@ class FileManager:
                         print(f"处理文件批次失败，跳过当前批次: {str(e)}")
                     # 尝试跳转到下一个批次
                     if results:
-                        last_id = results[-1]["id"]
+                        last_id = results[-1][0]
                         if self.verbose:
                             print(f"跳转到新的起始ID: {last_id}")
                     # 尝试重新初始化连接
@@ -169,56 +181,76 @@ class FileManager:
 
         total_scan_time = time.time() - scan_start_time
         avg_speed = processed / total_scan_time if total_scan_time > 0 else 0
-        
+
         if self.verbose:
             print(f"\n文件扫描完成:")
             print(f"- 总处理时间: {total_scan_time:.1f}秒")
             print(f"- 平均速度: {avg_speed:.0f} 文件/秒")
             print(f"- 找到 {deleted:,} 个单独文件需要删除")
 
-    def _process_files_batch_optimized(self, file_ids, redis_conn, max_retries):
+    def _process_files_batch_ultra_optimized(self, file_ids, redis_conn, max_retries):
         """
-        优化的批量文件处理
+        超级优化的批量文件处理，减少数据库查询次数和Redis操作
         """
         deleted_count = 0
 
-        # 过滤已缓存的文件
+        # 使用更大的管道批量检查缓存状态
         uncached_file_ids = []
         try:
-            # 使用管道批量检查缓存状态
-            pipeline = redis_conn.pipeline()
-            for fid in file_ids:
-                pipeline.sismember('file_cache', fid)
-            cache_results = redis_conn.execute(lambda: pipeline.execute())
+            # 分批处理Redis管道操作，避免单次操作过大
+            chunk_size = 1000
+            cache_results = []
+
+            for i in range(0, len(file_ids), chunk_size):
+                chunk = file_ids[i:i + chunk_size]
+                pipeline = redis_conn.pipeline()
+                for fid in chunk:
+                    pipeline.sismember('file_cache', fid)
+                chunk_results = redis_conn.execute(lambda: pipeline.execute())
+                cache_results.extend(chunk_results)
 
             uncached_file_ids = [fid for fid, is_cached in zip(file_ids, cache_results) if not is_cached]
         except Exception as e:
             if self.verbose:
                 print(f"批量检查缓存失败: {str(e)}")
-            # 如果缓存检查失败，继续处理
-            uncached_file_ids = file_ids  # 保守处理
+            uncached_file_ids = file_ids
 
         if not uncached_file_ids:
             return 0
 
-        # 批量处理文件信息
+        # 批量处理文件信息，使用更高效的查询
         retry_count = 0
         while retry_count < max_retries:
             try:
-                # 使用单一优化查询获取所有需要的信息
-                file_info = self._get_file_info_optimized(uncached_file_ids)
+                # 使用单一超级优化查询，减少JOIN操作
+                file_info = self._get_file_info_ultra_optimized(uncached_file_ids)
 
                 # 找出单独文件并批量添加到Redis
                 files_to_delete = []
+                files_to_cache = []
+
                 for file_id, info in file_info.items():
                     if info['ref_count'] == 0 and not info['is_avatar_banner']:
                         files_to_delete.append(file_id)
+                    files_to_cache.append(file_id)
 
-                if files_to_delete:
-                    # 批量添加到Redis
-                    redis_conn.execute(
-                        lambda: redis_conn.client.sadd('files_to_delete', *files_to_delete)
-                    )
+                # 批量更新Redis，使用更大的管道
+                if files_to_delete or files_to_cache:
+                    pipeline = redis_conn.pipeline()
+
+                    if files_to_delete:
+                        # 分批添加到files_to_delete，避免单次操作过大
+                        for i in range(0, len(files_to_delete), 1000):
+                            batch = files_to_delete[i:i + 1000]
+                            pipeline.sadd('files_to_delete', *batch)
+
+                    if files_to_cache:
+                        # 批量添加到缓存
+                        for i in range(0, len(files_to_cache), 1000):
+                            batch = files_to_cache[i:i + 1000]
+                            pipeline.sadd('file_cache', *batch)
+
+                    redis_conn.execute(lambda: pipeline.execute())
                     deleted_count = len(files_to_delete)
 
                 break
@@ -232,19 +264,73 @@ class FileManager:
                     if self.verbose:
                         print(f"批量处理文件失败，重试 {retry_count}/{max_retries}: {str(e)}")
                     import time
-                    time.sleep(0.5)
+                    time.sleep(0.1)  # 减少重试延迟
 
                 try:
                     self.db_conn.rollback()
-                    self.db_cursor = self.db_conn.cursor()
+                    self.db_cursor = self.db_conn.cursor(row_factory=dict_row)
                 except Exception:
                     pass
 
         return deleted_count
 
+    def _get_file_info_ultra_optimized(self, file_ids):
+        """
+        超级优化的文件信息查询，使用最少的数据库操作
+        """
+        if not file_ids:
+            return {}
+
+        # 使用更高效的查询策略，减少复杂的JOIN操作
+        try:
+            # 第一步：批量获取文件引用计数（使用优化的查询）
+            self.db_cursor.execute("""
+                WITH file_refs AS (
+                    SELECT
+                        unnest(n."fileIds"::text[]) as file_id,
+                        count(*) as ref_count
+                    FROM note n
+                    WHERE n."fileIds"::text[] && %s::text[]
+                    GROUP BY unnest(n."fileIds"::text[])
+                )
+                SELECT
+                    f.file_id,
+                    COALESCE(fr.ref_count, 0) as ref_count
+                FROM unnest(%s::text[]) as f(file_id)
+                LEFT JOIN file_refs fr ON fr.file_id = f.file_id
+            """, [file_ids, file_ids])
+
+            ref_results = {row[0]: row[1] for row in self.db_cursor.fetchall()}
+
+            # 第二步：批量检查头像和横幅使用情况（简化查询）
+            self.db_cursor.execute("""
+                SELECT DISTINCT unnest(ARRAY["avatarId", "bannerId"]) as file_id
+                FROM public.user
+                WHERE ("avatarId" = ANY(%s::text[]) OR "bannerId" = ANY(%s::text[]))
+                AND ("avatarId" IS NOT NULL OR "bannerId" IS NOT NULL)
+            """, [file_ids, file_ids])
+
+            avatar_banner_files = {row[0] for row in self.db_cursor.fetchall() if row[0]}
+
+            # 合并结果
+            result = {}
+            for file_id in file_ids:
+                result[file_id] = {
+                    'ref_count': ref_results.get(file_id, 0),
+                    'is_avatar_banner': file_id in avatar_banner_files
+                }
+
+            return result
+
+        except Exception as e:
+            if self.verbose:
+                print(f"超级优化查询失败，回退到标准查询: {str(e)}")
+            # 回退到原始方法
+            return self._get_file_info_optimized(file_ids)
+
     def _get_file_info_optimized(self, file_ids):
         """
-        使用单一优化查询获取文件的所有相关信息
+        使用单一优化查询获取文件的所有相关信息（回退方法）
         """
         if not file_ids:
             return {}
@@ -437,26 +523,92 @@ class FileManager:
                     print(f"重新初始化连接失败: {str(conn_error)}")
             raise  # 重新抛出异常，让上层处理
 
-    def delete_files_batch(self, file_ids: list[str], batch_size: int = 1000) -> None:
+    def delete_files_batch(self, file_ids: list[str], batch_size: int = 2000) -> None:
         """
-        批量删除文件，采用分批处理方式
+        超级优化的批量删除文件，采用分批处理方式
         Args:
             file_ids: 要删除的文件ID列表
+            batch_size: 批处理大小，默认2000
         """
         if not file_ids:
             return
 
-        # 使用 WITH 和 JOIN 来优化删除操作
-        self.db_cursor.execute(
-            """
-            WITH batch_ids AS (
-                SELECT unnest(%s::text[]) AS id
-            )
-            DELETE FROM drive_file df
-            USING batch_ids b
-            WHERE df.id = b.id
-            """,
-            [file_ids]
-        )
-
-        self.db_conn.commit()
+        # 确保file_ids是列表类型
+        file_ids = list(file_ids)
+        
+        # 如果文件数量较少，直接删除
+        if len(file_ids) <= batch_size:
+            try:
+                # 使用优化的删除查询
+                self.db_cursor.execute(
+                    """
+                    WITH batch_ids AS (
+                        SELECT unnest(%s::text[]) AS id
+                    )
+                    DELETE FROM drive_file df
+                    USING batch_ids b
+                    WHERE df.id = b.id
+                    """,
+                    [file_ids]
+                )
+                
+                if not self.db_conn.autocommit:
+                    self.db_conn.commit()
+                    
+            except Exception as e:
+                if self.verbose:
+                    print(f"批量删除文件失败: {str(e)}")
+                try:
+                    self.db_conn.rollback()
+                except:
+                    pass
+                raise
+        else:
+            # 对于大量文件，分批处理以避免内存问题
+            deleted_count = 0
+            try:
+                # 关闭自动提交，使用事务批量处理
+                old_autocommit = self.db_conn.autocommit
+                self.db_conn.autocommit = False
+                
+                for i in range(0, len(file_ids), batch_size):
+                    batch = file_ids[i:i + batch_size]
+                    
+                    self.db_cursor.execute(
+                        """
+                        WITH batch_ids AS (
+                            SELECT unnest(%s::text[]) AS id
+                        )
+                        DELETE FROM drive_file df
+                        USING batch_ids b
+                        WHERE df.id = b.id
+                        """,
+                        [batch]
+                    )
+                    
+                    deleted_count += len(batch)
+                    
+                    # 每处理一定数量的批次后提交一次，避免长事务
+                    if (i // batch_size + 1) % 5 == 0:  # 每5个批次提交一次
+                        self.db_conn.commit()
+                
+                # 最终提交
+                self.db_conn.commit()
+                
+                if self.verbose:
+                    print(f"成功删除 {deleted_count} 个文件")
+                    
+            except Exception as e:
+                if self.verbose:
+                    print(f"分批删除文件失败: {str(e)}")
+                try:
+                    self.db_conn.rollback()
+                except:
+                    pass
+                raise
+            finally:
+                # 恢复原来的autocommit设置
+                try:
+                    self.db_conn.autocommit = old_autocommit
+                except:
+                    pass

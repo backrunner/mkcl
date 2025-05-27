@@ -433,7 +433,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
 
             # 改为单线程删除，避免死锁问题
             print(f"准备删除 {len(notes_to_delete)} 个note（使用单线程模式避免死锁）")
-            
+
             try:
                 with tqdm(total=len(notes_to_delete), desc="删除note") as pbar:
                     # 使用较大的批处理大小，但单线程执行
@@ -445,11 +445,11 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                         try:
                             # 检查全局超时
                             check_global_timeout()
-                            
+
                             # 使用安全删除方法，避免外键约束死锁
                             note_manager.delete_notes_batch_safe(batch)
                             pbar.update(len(batch))
-                            
+
                         except psycopg.errors.DeadlockDetected as e:
                             print(f"删除note批次时检测到死锁，跳过此批次: {str(e)}")
                             # 记录失败的批次，但继续处理其他批次
@@ -586,29 +586,46 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                 error_details = traceback.format_exc()
                 raise RedisError("获取待删除单独文件列表失败", "步骤5:清理单独文件", error_details)
 
-            # 使用多线程并行删除单独文件
-            def delete_remaining_files_batch_parallel(batch):
-                # 每个线程使用独立的数据库连接，避免并发问题
+            # 使用优化的多线程并行删除单独文件
+            def delete_remaining_files_batch_ultra_optimized(batch):
+                """超级优化的文件删除函数，减少连接开销"""
                 try:
                     with db.get_connection() as thread_db_conn:
-                        thread_file_manager = FileManager(thread_db_conn)
-                        thread_file_manager.delete_files_batch(batch)
-                        return len(batch)
+                        # 设置更高效的连接参数
+                        thread_db_conn.autocommit = False
+                        thread_file_manager = FileManager(thread_db_conn, verbose=False)
+
+                        # 使用更大的批处理大小进行删除
+                        max_delete_batch = 2000
+                        deleted_count = 0
+
+                        for i in range(0, len(batch), max_delete_batch):
+                            sub_batch = batch[i:i + max_delete_batch]
+                            thread_file_manager.delete_files_batch(sub_batch)
+                            deleted_count += len(sub_batch)
+
+                        thread_db_conn.commit()
+                        return deleted_count
                 except Exception as e:
-                    print(f"删除单独文件批次时出错: {str(e)}")
-                    raise  # 重新抛出异常，让主线程能够捕获
+                    if verbose:
+                        print(f"删除单独文件批次时出错: {str(e)}")
+                    raise
 
             try:
                 with tqdm(total=len(remaining_files), desc="删除单独文件") as pbar:
-                    # 优化批处理大小
-                    optimized_batch_size = min(batch_size * 2, 500)  # 增大删除操作的批处理大小
-                    remaining_batches = [list(remaining_files)[i:i+optimized_batch_size]
-                                    for i in range(0, len(remaining_files), optimized_batch_size)]
+                    # 大幅优化批处理大小，减少线程创建开销
+                    ultra_optimized_batch_size = min(batch_size * 5, 2000)  # 进一步增大批处理大小
+                    remaining_batches = [list(remaining_files)[i:i+ultra_optimized_batch_size]
+                                    for i in range(0, len(remaining_files), ultra_optimized_batch_size)]
+
+                    if verbose:
+                        print(f"使用超级优化模式删除 {len(remaining_files)} 个文件，分为 {len(remaining_batches)} 个批次")
 
                     try:
-                        # 添加超时控制
-                        with ThreadPoolExecutor(max_workers=min(cpu_count(), 8)) as executor:
-                            futures = {executor.submit(delete_remaining_files_batch_parallel, batch): batch
+                        # 减少线程数量，使用更大的批次
+                        max_workers = min(cpu_count() // 2, 4)  # 减少线程数，避免过度竞争
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            futures = {executor.submit(delete_remaining_files_batch_ultra_optimized, batch): batch
                                     for batch in remaining_batches}
 
                             # 使用配置的超时时间
@@ -625,7 +642,7 @@ def clean_data(db_info, redis_info, start_date, end_date, timeout_minutes=180, v
                                                 f.cancel()
                                         break
 
-                                    result = future.result(timeout=300)  # 单个任务5分钟超时
+                                    result = future.result(timeout=600)  # 单个任务10分钟超时（增加超时时间）
                                     pbar.update(result)
                                 except concurrent.futures.TimeoutError:
                                     print(f"删除单独文件任务超时，取消剩余任务")
